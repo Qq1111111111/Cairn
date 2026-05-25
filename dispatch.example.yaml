@@ -1,0 +1,83 @@
+server: "http://cairn-server:38080"
+
+WEB_USERNAME: "admin"
+WEB_PASSWORD: "change-me"
+
+DINGTALK_ENABLED: false
+DINGTALK_WEBHOOK: ""
+DINGTALK_SECRET: ""
+
+common_env:
+  TSEC_SERVER_HOST: "<SERVER_HOST>:38080"
+  TSEC_AGENT_TOKEN: "change-me"
+
+runtime:
+  interval: 3
+  max_workers: 9
+  max_running_projects: 3
+  max_project_workers: 3
+  healthcheck_timeout: 20
+  prompt_group: "default"
+
+tasks:
+  bootstrap:
+    timeout: 300
+    conclude_timeout: 90
+  reason:
+    timeout: 300
+    max_intents: 2
+  explore:
+    timeout: 300
+    conclude_timeout: 90
+
+container:
+  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  network_mode: "host"
+  completed_action: "stop"
+  # cap_add:
+  #   - "NET_RAW"
+  #   - "NET_ADMIN"
+
+
+workers:
+  # - name: "claudecode_mimo-v2.5-pro"
+  #   type: "claudecode"
+  #   task_types: [bootstrap, reason, explore]
+  #   max_running: 5
+  #   priority: 0
+  #   env:
+  #     ANTHROPIC_MODEL: "mimo-v2.5-pro"
+  #     ANTHROPIC_BASE_URL: "https://api.example.com/anthropic"
+  #     ANTHROPIC_AUTH_TOKEN: "change-me"
+
+  # - name: "claudecode_deepseek-v4-flash"
+  #   type: "claudecode"
+  #   task_types: [bootstrap, reason, explore]
+  #   max_running: 5
+  #   priority: 0
+  #   env:
+  #     ANTHROPIC_MODEL: "deepseek-v4-flash"
+  #     ANTHROPIC_BASE_URL: "https://api.example.com/anthropic"
+  #     ANTHROPIC_AUTH_TOKEN: "change-me"
+
+  # - name: "codex_deepseek-v4-flash"
+  #   type: "codex"
+  #   task_types: [bootstrap,reason,explore]
+  #   max_running: 5
+  #   priority: 0
+  #   env:
+  #     CODEX_MODEL: "deepseek-v4-flash"
+  #     CODEX_BASE_URL: "https://api.example.com"
+  #     OPENAI_API_KEY: "change-me"
+
+  - name: "pi_deepseek-v4-flash"
+    type: "pi"
+    task_types: [bootstrap,reason,explore]
+    max_running: 5
+    priority: 0
+    env:
+      PI_MODEL: "deepseek-v4-flash"
+      PI_BASE_URL: "https://api.example.com/v1"
+      PI_API_KEY: "change-me"
+      PI_PROVIDER_API: "openai-completions"
+      PI_MODEL_CONTEXT_WINDOW: "1000000"
