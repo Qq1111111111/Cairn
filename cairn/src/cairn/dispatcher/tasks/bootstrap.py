@@ -190,6 +190,10 @@ def run_bootstrap_task(
                 worker.name,
                 data["fact_description"],
                 data["complete_description"],
+                report=data.get("report"),
+                dingtalk_enabled=config.dingtalk_enabled,
+                dingtalk_webhook=config.dingtalk_webhook,
+                dingtalk_secret=config.dingtalk_secret,
                 source="bootstrap",
                 phase_ms=execute_ms,
                 total_ms=int((time.perf_counter() - task_started) * 1000),
@@ -353,7 +357,7 @@ def _try_conclude_fallback(
                 worker.name,
                 preview(str(conclude_data.get("complete"))),
             )
-        kind, fact_description = validate_bootstrap_conclude_payload(payload)
+        kind, conclude_data = validate_bootstrap_conclude_payload(payload)
     except Exception as exc:
         LOG.warning(
             "bootstrap conclude parse failed project=%s intent=%s worker=%s error=%s conclude_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -378,12 +382,17 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "rejected"
+    assert conclude_data is not None
     return write_conclude_result(
         client,
         project.project.id,
         intent.id,
         worker.name,
-        fact_description,
+        conclude_data["description"],
+        report=conclude_data.get("report"),
+        dingtalk_enabled=config.dingtalk_enabled,
+        dingtalk_webhook=config.dingtalk_webhook,
+        dingtalk_secret=config.dingtalk_secret,
         source="bootstrap_conclude",
         phase_ms=conclude_ms,
     )
@@ -415,6 +424,10 @@ def _write_bootstrap_complete_result(
     fact_description: str,
     complete_description: str,
     *,
+    report=None,
+    dingtalk_enabled: bool = True,
+    dingtalk_webhook: str | None = None,
+    dingtalk_secret: str | None = None,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
@@ -425,6 +438,10 @@ def _write_bootstrap_complete_result(
         intent_id,
         worker_name,
         fact_description,
+        report=report,
+        dingtalk_enabled=dingtalk_enabled,
+        dingtalk_webhook=dingtalk_webhook,
+        dingtalk_secret=dingtalk_secret,
         source=source,
         phase_ms=phase_ms,
         total_ms=total_ms,

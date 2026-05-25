@@ -14,7 +14,7 @@ from cairn.server.models import Intent, ProjectDetail, ProjectSummary, Settings
 LOG = logging.getLogger(__name__)
 
 
-class ProtocolError(RuntimeError):
+class ProtocolError(requests.RequestException):
     def __init__(self, message: str, status_code: int, response_text: str = ""):
         super().__init__(message)
         self.status_code = status_code
@@ -33,9 +33,17 @@ class ApiResult:
 
 
 class CairnClient:
-    def __init__(self, base_url: str, timeout: float = 10.0):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 10.0,
+        auth_username: str | None = None,
+        auth_password: str | None = None,
+    ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._auth_username = auth_username
+        self._auth_password = auth_password
         self._summary_adapter = TypeAdapter(list[ProjectSummary])
         self._local = threading.local()
         self._sessions: dict[int, requests.Session] = {}
@@ -48,27 +56,29 @@ class CairnClient:
         for session in sessions:
             session.close()
 
+    def authenticate(self) -> None:
+        if not self._has_auth_credentials():
+            return
+        session = self._session()
+        self._login(session)
+
     def list_projects(self) -> list[ProjectSummary]:
-        response = self._session().get(self._url("/projects"), timeout=self._timeout)
+        response = self._request("GET", "/projects")
         response.raise_for_status()
         return self._summary_adapter.validate_python(response.json())
 
     def get_project(self, project_id: str) -> ProjectDetail:
-        response = self._session().get(self._url(f"/projects/{project_id}"), timeout=self._timeout)
+        response = self._request("GET", f"/projects/{project_id}")
         response.raise_for_status()
         return ProjectDetail.model_validate(response.json())
 
     def get_settings(self) -> Settings:
-        response = self._session().get(self._url("/settings"), timeout=self._timeout)
+        response = self._request("GET", "/settings")
         response.raise_for_status()
         return Settings.model_validate(response.json())
 
     def export_project(self, project_id: str) -> str:
-        response = self._session().get(
-            self._url(f"/projects/{project_id}/export"),
-            params={"format": "yaml"},
-            timeout=self._timeout,
-        )
+        response = self._request("GET", f"/projects/{project_id}/export", params={"format": "yaml"})
         response.raise_for_status()
         return response.text
 
@@ -107,11 +117,21 @@ class CairnClient:
             json={"worker": worker},
         )
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
+    def conclude(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        description: str,
+        report: Any | None = None,
+    ) -> ApiResult:
+        body: dict[str, Any] = {"worker": worker, "description": description}
+        if report is not None:
+            body["report"] = report
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents/{intent_id}/conclude",
-            json={"worker": worker, "description": description},
+            json=body,
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
@@ -130,19 +150,70 @@ class CairnClient:
 
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
         try:
-            response = self._session().request(
-                method,
-                self._url(path),
-                json=json,
-                timeout=self._timeout,
-            )
+            response = self._request(method, path, json=json)
         except requests.RequestException as exc:
+            if isinstance(exc, ProtocolError):
+                return ApiResult(status_code=exc.status_code, text=exc.response_text or str(exc))
             LOG.warning("request failed method=%s path=%s error=%s", method, path, exc)
             return ApiResult(status_code=0, text=str(exc))
         data: Any | None = None
         if response.headers.get("content-type", "").startswith("application/json"):
             data = response.json()
         return ApiResult(status_code=response.status_code, data=data, text=response.text)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> requests.Response:
+        session = self._session()
+        response = session.request(
+            method,
+            self._url(path),
+            json=json,
+            params=params,
+            timeout=self._timeout,
+        )
+        if response.status_code == 401 and self._has_auth_credentials():
+            self._login(session)
+            response = session.request(
+                method,
+                self._url(path),
+                json=json,
+                params=params,
+                timeout=self._timeout,
+            )
+        return response
+
+    def _login(self, session: requests.Session) -> None:
+        if not self._has_auth_credentials():
+            return
+        response = session.post(
+            self._url("/auth/login"),
+            json={"username": self._auth_username, "password": self._auth_password},
+            timeout=self._timeout,
+        )
+        data: Any | None = None
+        if response.headers.get("content-type", "").startswith("application/json"):
+            data = response.json()
+        if not response.ok:
+            detail = self._response_detail(response, data)
+            raise ProtocolError(f"authentication failed: {detail}", response.status_code, response.text)
+
+        if isinstance(data, dict) and data.get("enabled") is False:
+            return
+
+    def _response_detail(self, response: requests.Response, data: Any | None) -> str:
+        if isinstance(data, dict):
+            detail = data.get("detail")
+            if isinstance(detail, str) and detail.strip():
+                return detail.strip()
+        if response.text.strip():
+            return response.text.strip()
+        return f"HTTP {response.status_code}"
 
     def _url(self, path: str) -> str:
         return f"{self._base_url}{path}"
@@ -156,7 +227,12 @@ class CairnClient:
         adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
+        if self._has_auth_credentials():
+            self._login(session)
         self._local.session = session
         with self._sessions_lock:
             self._sessions[threading.get_ident()] = session
         return session
+
+    def _has_auth_credentials(self) -> bool:
+        return bool(self._auth_username and self._auth_password)

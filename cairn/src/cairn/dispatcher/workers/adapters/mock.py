@@ -42,6 +42,33 @@ def _rule_matches(rule, prompt):
         return False
     return True
 
+def _mock_report(label):
+    return {
+        "title": "漏洞报告",
+        "summary": f"mock report for {label}",
+        "findings": [
+            {
+                "title": f"mock finding for {label}",
+                "asset": "mock://target",
+                "endpoint": f"GET /mock/{label}",
+                "source": f"mock source for {label}",
+                "type": "mock_finding",
+                "status": "已确认",
+                "severity": "中危",
+                "finding": f"mock fact for {label}",
+                "fix": "mock remediation",
+                "evidence": [
+                    {
+                        "kind": "packet",
+                        "label": "请求/响应包",
+                        "request_packet": f"GET /mock/{label} HTTP/1.1\\nHost: mock.local",
+                        "response_packet": "HTTP/1.1 200 OK\\nContent-Type: text/plain\\n\\nmock response",
+                    }
+                ],
+            }
+        ],
+    }
+
 rules = phase_cfg.get("rules") or []
 forced = None
 for rule in rules:
@@ -92,9 +119,9 @@ if phase=="reason":
 
 if phase=="bootstrap":
     if outcome=="complete":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap"},"complete":{"description":"mock bootstrap complete from fact"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap"},"complete":{"description":"mock bootstrap complete from fact"},"report":_mock_report("bootstrap")}}, ensure_ascii=False))
     elif outcome=="fact":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact-only bootstrap result"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact-only bootstrap result"},"report":_mock_report("bootstrap")}}, ensure_ascii=False))
     elif outcome=="rejected":
         print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
     else:
@@ -103,7 +130,7 @@ if phase=="bootstrap":
 
 if phase=="bootstrap_conclude":
     if outcome=="fact":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap_conclude"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap_conclude"},"report":_mock_report("bootstrap_conclude")}}, ensure_ascii=False))
     elif outcome=="rejected":
         print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
     else:
@@ -112,7 +139,7 @@ if phase=="bootstrap_conclude":
 
 if outcome=="fact":
     label = prompt.get("intent_id") or phase
-    print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}"}} , ensure_ascii=False))
+    print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}","report":_mock_report(label)}} , ensure_ascii=False))
 elif outcome=="rejected":
     print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
 else:

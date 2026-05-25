@@ -196,14 +196,25 @@ class WorkerConfig(BaseModel):
 
 
 class DispatchConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     server: str
+    web_username: str | None = Field(default=None, alias="WEB_USERNAME")
+    web_password: str | None = Field(default=None, alias="WEB_PASSWORD")
+    dingtalk_enabled: bool = Field(default=True, alias="DINGTALK_ENABLED")
     runtime: RuntimeConfig
     tasks: TasksConfig
     container: ContainerConfig
     common_env: dict[str, str] = Field(default_factory=dict)
+    dingtalk_webhook: str | None = Field(default=None, alias="DINGTALK_WEBHOOK")
+    dingtalk_secret: str | None = Field(default=None, alias="DINGTALK_SECRET")
     workers: list[WorkerConfig]
+
+    @model_validator(mode="after")
+    def validate_web_auth(self) -> "DispatchConfig":
+        if bool(self.web_username) != bool(self.web_password):
+            raise ValueError("WEB_USERNAME and WEB_PASSWORD must be set together")
+        return self
 
     @model_validator(mode="before")
     @classmethod

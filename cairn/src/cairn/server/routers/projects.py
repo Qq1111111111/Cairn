@@ -18,6 +18,7 @@ from cairn.server.models import (
     UpdateProjectStatusRequest,
 )
 from cairn.server.services import (
+    build_reports,
     build_intents,
     check_project_completed,
     check_project_active,
@@ -110,6 +111,7 @@ def create_project(body: CreateProjectRequest):
             ],
             intents=[],
             hints=hints,
+            reports=[],
         )
 
 
@@ -133,6 +135,7 @@ def get_project(project_id: str):
             facts=[Fact(**dict(f)) for f in facts],
             intents=build_intents(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            reports=build_reports(conn, project_id),
         )
 
 

@@ -17,6 +17,24 @@ CREATE TABLE IF NOT EXISTS settings (
 
 INSERT OR IGNORE INTO settings (rowid, intent_timeout, reason_timeout) VALUES (1, 15, 15);
 
+CREATE TABLE IF NOT EXISTS auth_users (
+    username TEXT PRIMARY KEY,
+    password_salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token TEXT PRIMARY KEY,
+    username TEXT NOT NULL REFERENCES auth_users(username) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -46,6 +64,21 @@ CREATE TABLE IF NOT EXISTS intents (
     created_at TEXT NOT NULL,
     concluded_at TEXT,
     PRIMARY KEY (id, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS reports (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    intent_id TEXT NOT NULL,
+    fact_id TEXT NOT NULL,
+    worker TEXT NOT NULL,
+    source_fact_ids TEXT NOT NULL,
+    request_packet TEXT NOT NULL,
+    response_packet TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id),
+    FOREIGN KEY (intent_id, project_id) REFERENCES intents(id, project_id) ON DELETE CASCADE,
+    FOREIGN KEY (fact_id, project_id) REFERENCES facts(id, project_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS intent_sources (

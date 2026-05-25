@@ -925,7 +925,7 @@ codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model
 ### `dispatch.yaml`
 
 ```yaml
-server: "http://127.0.0.1:8000"
+server: "http://127.0.0.1:38080"
 
 runtime:
   max_workers: 5  # total running tasks

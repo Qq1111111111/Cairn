@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -36,6 +37,64 @@ class Hint(BaseModel):
     created_at: str
 
 
+class AuthLoginRequest(BaseModel):
+    username: str
+    password: str
+
+    @field_validator("username", "password")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class AuthStatus(BaseModel):
+    enabled: bool
+    authenticated: bool
+    username: str | None = None
+    expires_at: str | None = None
+    locked_until: str | None = None
+    message: str | None = None
+
+
+class ReportEvidence(BaseModel):
+    kind: str | None = None
+    label: str | None = None
+    content: str | None = None
+    request_packet: str = ""
+    response_packet: str = ""
+
+
+class ReportFinding(BaseModel):
+    title: str
+    asset: str | None = None
+    endpoint: str | None = None
+    source: str | None = None
+    type: str | None = None
+    status: str | None = None
+    severity: str | None = None
+    finding: str = ""
+    fix: str | None = None
+    evidence: list[ReportEvidence] = Field(default_factory=list)
+
+
+class Report(BaseModel):
+    id: str
+    project_id: str
+    intent_id: str
+    fact_id: str
+    worker: str
+    source_fact_ids: list[str] = Field(default_factory=list)
+    request_packet: str
+    response_packet: str
+    created_at: str
+    title: str = "漏洞报告"
+    summary: str | None = None
+    findings: list[ReportFinding] = Field(default_factory=list)
+
+
 class ProjectReason(BaseModel):
     worker: str
     trigger: str
@@ -64,6 +123,7 @@ class ProjectDetail(BaseModel):
     facts: list[Fact]
     intents: list[Intent]
     hints: list[Hint]
+    reports: list[Report] = Field(default_factory=list)
 
 
 class CreateHintInline(BaseModel):
@@ -165,6 +225,7 @@ class ReasonClaimRequest(BaseModel):
 class ConcludeRequest(BaseModel):
     worker: str
     description: str
+    report: Any | None = None
 
     @field_validator("worker", "description")
     @classmethod

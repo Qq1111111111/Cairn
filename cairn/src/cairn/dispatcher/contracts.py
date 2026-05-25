@@ -41,7 +41,9 @@ def _looks_like_reason_data(payload: dict[str, Any]) -> bool:
 
 
 def _looks_like_bootstrap_execute_data(payload: dict[str, Any]) -> bool:
-    if not isinstance(payload, dict) or set(payload) != {"fact", "complete"}:
+    if not isinstance(payload, dict) or not {"fact", "complete"}.issubset(payload):
+        return False
+    if set(payload) - {"fact", "complete", "report"}:
         return False
     return _is_dict(payload.get("fact")) and _is_dict(payload.get("complete"))
 
@@ -50,13 +52,24 @@ def _looks_like_bootstrap_conclude_data(payload: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
     keys = set(payload)
-    if keys not in ({"fact"}, {"fact", "complete"}):
+    if "fact" not in keys or keys - {"fact", "complete", "report"}:
         return False
     return _is_dict(payload.get("fact"))
 
 
 def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
-    return isinstance(payload, dict) and set(payload) == {"description"}
+    return (
+        isinstance(payload, dict)
+        and "description" in payload
+        and not (set(payload) - {"description", "report"})
+    )
+
+
+def _extract_report_payload(data: dict[str, Any]) -> dict[str, Any] | list[Any] | None:
+    report = data.get("report")
+    if isinstance(report, dict) or isinstance(report, list):
+        return report
+    return None
 
 
 def validate_reason_payload(
@@ -101,7 +114,7 @@ def validate_reason_payload(
     return "noop", None
 
 
-def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, str] | None]:
+def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -120,6 +133,9 @@ def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, di
         raise ValueError("fact.description is required")
 
     result = {"fact_description": fact_description.strip()}
+    report = _extract_report_payload(data)
+    if report is not None:
+        result["report"] = report
     complete = data.get("complete")
     if complete is None:
         raise ValueError("complete is required")
@@ -132,7 +148,7 @@ def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, di
     return "complete", result
 
 
-def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
+def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -142,7 +158,7 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
         data = payload
     if not isinstance(data, dict):
         raise ValueError("accepted must be true or false")
-    extra_keys = set(data) - {"fact", "complete"}
+    extra_keys = set(data) - {"fact", "complete", "report"}
     if extra_keys:
         raise ValueError("unexpected keys in conclude payload")
     fact = data.get("fact")
@@ -151,10 +167,14 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
     fact_description = fact.get("description")
     if not isinstance(fact_description, str) or not fact_description.strip():
         raise ValueError("fact.description is required")
-    return "fact", fact_description.strip()
+    result: dict[str, Any] = {"description": fact_description.strip()}
+    report = _extract_report_payload(data)
+    if report is not None:
+        result["report"] = report
+    return "fact", result
 
 
-def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
+def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -167,4 +187,8 @@ def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description is required")
-    return "fact", description.strip()
+    result: dict[str, Any] = {"description": description.strip()}
+    report = _extract_report_payload(data)
+    if report is not None:
+        result["report"] = report
+    return "fact", result

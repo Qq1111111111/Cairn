@@ -4,13 +4,16 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from cairn.dispatcher.config import WorkerConfig
+from cairn.dispatcher.notifications import notify_dingtalk_report
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.runtime.process import ProcessResult
+from cairn.reporting import build_fallback_report_from_conclusion, report_is_present
 
 HEALTHCHECK_COMMUNICATE_GRACE_SECONDS = 10
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
@@ -183,6 +186,10 @@ def write_conclude_result(
     worker_name: str,
     description: str,
     *,
+    report: Any | None = None,
+    dingtalk_enabled: bool = True,
+    dingtalk_webhook: str | None = None,
+    dingtalk_secret: str | None = None,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
@@ -193,6 +200,10 @@ def write_conclude_result(
         intent_id,
         worker_name,
         description,
+        report=report,
+        dingtalk_enabled=dingtalk_enabled,
+        dingtalk_webhook=dingtalk_webhook,
+        dingtalk_secret=dingtalk_secret,
         source=source,
         phase_ms=phase_ms,
         total_ms=total_ms,
@@ -206,11 +217,19 @@ def write_conclude_result_with_fact_id(
     worker_name: str,
     description: str,
     *,
+    report: Any | None = None,
+    dingtalk_enabled: bool = True,
+    dingtalk_webhook: str | None = None,
+    dingtalk_secret: str | None = None,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
 ) -> ConcludeWriteResult:
-    response = client.conclude(project_id, intent_id, worker_name, description)
+    effective_report = report
+    if not report_is_present(effective_report):
+        effective_report = build_fallback_report_from_conclusion(description)
+
+    response = client.conclude(project_id, intent_id, worker_name, description, effective_report)
     if response.ok:
         fact_id: str | None = None
         if isinstance(response.data, dict):
@@ -237,6 +256,18 @@ def write_conclude_result_with_fact_id(
                 source,
                 phase_ms,
                 total_ms,
+            )
+        if report_is_present(effective_report):
+            notify_dingtalk_report(
+                enabled=dingtalk_enabled,
+                webhook=dingtalk_webhook,
+                secret=dingtalk_secret,
+                project_id=project_id,
+                intent_id=intent_id,
+                fact_id=fact_id,
+                worker_name=worker_name,
+                source=source,
+                report=effective_report,
             )
         return ConcludeWriteResult(status="success", fact_id=fact_id)
     if response.status_code == 403:
