@@ -12,6 +12,19 @@ _SECTION_RE = re.compile(
 _URL_RE = re.compile(r"https?://[^\s`'\"，。；、)）\]}]+")
 _PATH_RE = re.compile(r"(?<![:\w])/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)+")
 _MARKDOWN_STRIP_RE = re.compile(r"[*_`#]+")
+_EVIDENCE_LITERAL_RE = re.compile(
+    r"`([^`]{2,160})`|'([^']{2,160})'|\"([^\"]{2,160})\""
+)
+_AUTH_FRAGMENT_RE = re.compile(r"\b(?:Basic|Bearer)\s+[A-Za-z0-9._~+/=-]{6,}", re.IGNORECASE)
+_HEADER_FRAGMENT_RE = re.compile(
+    r"\b(?:Authorization|access-control-[a-z-]+)\s*:\s*[^，。；;]+",
+    re.IGNORECASE,
+)
+_KEY_VALUE_FRAGMENT_RE = re.compile(
+    r"\b(?:agentId|corpId|jsticket|token|secret|password|pwd|authcode)\s*[:=]\s*['\"]?[^'\"，。；;\s]+",
+    re.IGNORECASE,
+)
+_CREDENTIAL_PAIR_RE = re.compile(r"\b[A-Za-z0-9_.-]{2,}:[A-Za-z0-9_.@#$%^&*+=!-]{2,}\b")
 
 _NEGATIVE_PHRASES = (
     "未发现",
@@ -72,6 +85,56 @@ _REPORTABLE_KEYWORDS = (
     "sql injection",
     "vulnerability",
     "exposure",
+)
+
+_CODE_EVIDENCE_KEYWORDS = (
+    "泄露",
+    "暴露",
+    "硬编码",
+    "默认凭证",
+    "凭证",
+    "密钥",
+    "错误信息",
+    "调试",
+    "配置错误",
+    "源码",
+    "代码",
+    "前端",
+    "文件上传",
+    "oauth",
+    "cors",
+    "upload",
+    "uploadfile",
+    "token",
+    "secret",
+    "credential",
+    "authorization",
+    "basic",
+    "bearer",
+    "agentid",
+    "corpid",
+    "jsticket",
+)
+
+_EVIDENCE_LINE_MARKERS = (
+    "=",
+    ":",
+    "=>",
+    "function",
+    "const ",
+    "let ",
+    "var ",
+    "authorization",
+    "basic ",
+    "bearer ",
+    "access-control",
+    "agentid",
+    "corpid",
+    "jsticket",
+    "token",
+    "secret",
+    "password",
+    "upload",
 )
 
 _STRONG_POSITIVE_PHRASES = (
@@ -153,14 +216,18 @@ def report_is_present(report: Any) -> bool:
     return report not in (None, {}, [])
 
 
-def build_fallback_report_from_conclusion(description: str) -> dict[str, Any] | None:
+def build_fallback_report_from_conclusion(
+    description: str,
+    *,
+    source_context: list[str] | None = None,
+) -> dict[str, Any] | None:
     text = description.strip()
     if not text:
         return None
 
     findings = []
     for section in _split_sections(text):
-        finding = _finding_from_section(section)
+        finding = _finding_from_section(section, source_context=source_context)
         if finding is not None:
             findings.append(finding)
         if len(findings) >= MAX_AUTO_FINDINGS:
@@ -194,7 +261,11 @@ def _split_sections(text: str) -> list[str]:
     return paragraphs or [text.strip()]
 
 
-def _finding_from_section(section: str) -> dict[str, Any] | None:
+def _finding_from_section(
+    section: str,
+    *,
+    source_context: list[str] | None = None,
+) -> dict[str, Any] | None:
     compact = " ".join(section.split())
     lowered = compact.lower()
     if not _has_reportable_signal(lowered):
@@ -203,24 +274,251 @@ def _finding_from_section(section: str) -> dict[str, Any] | None:
     title = _title_from_section(compact)
     endpoints = _extract_paths(compact)
     urls = _URL_RE.findall(compact)
+    asset = urls[0] if urls else None
+    endpoint = "、".join(endpoints[:6]) if endpoints else None
+    finding_type = _infer_type(lowered)
+    evidence = _build_evidence_for_section(
+        section=section,
+        compact=compact,
+        title=title,
+        finding_type=finding_type,
+        asset=asset,
+        endpoint=endpoint,
+        source_context=source_context,
+    )
 
     return {
         "title": title,
-        "asset": urls[0] if urls else None,
-        "endpoint": "、".join(endpoints[:6]) if endpoints else None,
-        "type": _infer_type(lowered),
+        "asset": asset,
+        "endpoint": endpoint,
+        "type": finding_type,
         "status": "已确认",
         "severity": _infer_severity(lowered),
         "finding": compact,
         "fix": None,
-        "evidence": [
-            {
-                "kind": "code",
-                "label": "结论原文",
-                "content": section.strip(),
-            }
-        ],
+        "evidence": evidence,
     }
+
+
+def _build_evidence_for_section(
+    *,
+    section: str,
+    compact: str,
+    title: str,
+    finding_type: str | None,
+    asset: str | None,
+    endpoint: str | None,
+    source_context: list[str] | None,
+) -> list[dict[str, Any]]:
+    if _prefers_code_evidence(title, finding_type, compact):
+        content = build_code_evidence_excerpt(
+            finding_text=section,
+            asset=asset,
+            endpoint=endpoint,
+            source_context=source_context,
+        )
+        if content:
+            return [
+                {
+                    "kind": "code",
+                    "label": "源码上下文",
+                    "content": content,
+                }
+            ]
+    return [
+        {
+            "kind": "code",
+            "label": "结论原文",
+            "content": section.strip(),
+        }
+    ]
+
+
+def finding_prefers_code_evidence(
+    *,
+    title: str | None,
+    finding_type: str | None,
+    finding_text: str | None,
+) -> bool:
+    return _prefers_code_evidence(title or "", finding_type, finding_text or "")
+
+
+def build_code_evidence_excerpt(
+    *,
+    finding_text: str,
+    asset: str | None = None,
+    endpoint: str | None = None,
+    source_context: list[str] | None = None,
+) -> str | None:
+    fragments: list[str] = []
+    for seed in (asset, endpoint):
+        if seed:
+            fragments.append(seed)
+
+    terms = _dedupe_lines(
+        [seed for seed in (asset, endpoint) if seed]
+        + _URL_RE.findall(finding_text)
+        + _extract_paths(finding_text)
+    )
+    fragments.extend(_extract_evidence_fragments(finding_text))
+    for context in source_context or []:
+        if not terms or _context_matches_terms(context, terms):
+            fragments.extend(_extract_evidence_fragments(context))
+
+    lines = _dedupe_lines(fragments)
+    if not lines:
+        lines = _dedupe_lines(_context_clauses(finding_text))
+    if not lines:
+        return None
+    return "\n".join(lines[:14])
+
+
+def _prefers_code_evidence(
+    title: str,
+    finding_type: str | None,
+    finding_text: str,
+) -> bool:
+    haystack = " ".join(
+        part
+        for part in (title, finding_type or "", finding_text)
+        if part
+    ).lower()
+    if any(
+        keyword in haystack
+        for keyword in (
+            "硬编码",
+            "默认凭证",
+            "客户端凭证",
+            "密钥",
+            "basic ",
+            "bearer ",
+            "secret",
+            "default credential",
+            "hardcoded credential",
+        )
+    ):
+        return True
+
+    has_source_marker = any(
+        keyword in haystack
+        for keyword in (
+            "源码",
+            "源代码",
+            "前端",
+            "bundle",
+            "chunk",
+            ".js",
+            "js文件",
+            "静态文件",
+            "代码",
+            "文件中",
+        )
+    )
+    has_leak_marker = any(
+        keyword in haystack
+        for keyword in (
+            "泄露",
+            "暴露",
+            "敏感信息",
+            "端点列表",
+            "api端点",
+            "业务数据模型",
+        )
+    )
+    return has_source_marker and has_leak_marker
+
+
+def _extract_evidence_fragments(text: str) -> list[str]:
+    compact = " ".join(text.split()).strip()
+    if not compact:
+        return []
+
+    fragments: list[str] = []
+    fragments.extend(match.group(0).strip() for match in _HEADER_FRAGMENT_RE.finditer(compact))
+    fragments.extend(match.group(0).strip() for match in _AUTH_FRAGMENT_RE.finditer(compact))
+    fragments.extend(match.group(0).strip() for match in _KEY_VALUE_FRAGMENT_RE.finditer(compact))
+    for match in _CREDENTIAL_PAIR_RE.finditer(compact):
+        value = match.group(0).strip()
+        if not value.lower().startswith(("http:", "https:")):
+            fragments.append(value)
+    fragments.extend(_URL_RE.findall(compact))
+    fragments.extend(_extract_paths(compact))
+
+    for match in _EVIDENCE_LITERAL_RE.finditer(compact):
+        for group in match.groups():
+            if group and _looks_like_evidence_literal(group):
+                fragments.append(group.strip())
+
+    if not fragments and _looks_like_evidence_line(compact):
+        fragments.extend(_context_clauses(compact))
+
+    return fragments
+
+
+def _context_matches_terms(context: str, terms: list[str]) -> bool:
+    if not terms:
+        return True
+    lowered = context.lower()
+    for term in terms:
+        value = term.strip()
+        if not value:
+            continue
+        if value.lower() in lowered:
+            return True
+        if value.startswith("/") and value.split("?", 1)[0].lower() in lowered:
+            return True
+    return False
+
+
+def _looks_like_evidence_literal(value: str) -> bool:
+    text = value.strip()
+    if not text or len(text) > 160:
+        return False
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in _CODE_EVIDENCE_KEYWORDS):
+        return True
+    if any(ch in text for ch in ("/", "\\", ":", "=", "{", "}", ".", "-")):
+        return True
+    if text.isascii() and len(text.split()) <= 4:
+        return True
+    return False
+
+
+def _looks_like_evidence_line(text: str) -> bool:
+    if len(text) > 260:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _EVIDENCE_LINE_MARKERS)
+
+
+def _context_clauses(text: str) -> list[str]:
+    clauses = [
+        " ".join(part.split()).strip()
+        for part in re.split(r"[。；;\n]\s*", text)
+        if part.strip()
+    ]
+    results: list[str] = []
+    for clause in clauses:
+        lowered = clause.lower()
+        if (
+            _URL_RE.search(clause)
+            or _PATH_RE.search(clause)
+            or any(keyword in lowered for keyword in _CODE_EVIDENCE_KEYWORDS)
+        ):
+            results.append(_truncate(clause, 240))
+    return results
+
+
+def _dedupe_lines(lines: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for line in lines:
+        text = " ".join(str(line).split()).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(_truncate(text, 240))
+    return deduped
 
 
 def _has_reportable_signal(lowered: str) -> bool:
@@ -248,7 +546,7 @@ def _extract_paths(text: str) -> list[str]:
     seen: set[str] = set()
     paths: list[str] = []
     for match in _PATH_RE.findall(text):
-        value = match.rstrip(".,;，。；、")
+        value = match.rstrip(".,;:：，。；、)）]}】")
         if len(value) < 2 or value in seen:
             continue
         seen.add(value)

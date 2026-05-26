@@ -159,6 +159,34 @@ def project_allows_conclude_fallback(client: CairnClient, project_id: str, *, wo
     return False
 
 
+def _source_context_for_intent(
+    client: CairnClient,
+    project_id: str,
+    intent_id: str,
+) -> list[str]:
+    try:
+        project = client.get_project(project_id)
+    except Exception as exc:
+        LOG.info(
+            "fallback report source context unavailable project=%s intent=%s error=%s",
+            project_id,
+            intent_id,
+            exc,
+        )
+        return []
+    facts = {fact.id: fact.description for fact in project.facts}
+    source_ids: list[str] = []
+    for intent in project.intents:
+        if intent.id == intent_id:
+            source_ids = list(intent.from_)
+            break
+    return [
+        facts[source_id]
+        for source_id in source_ids
+        if facts.get(source_id)
+    ]
+
+
 def best_effort_release_reason(client: CairnClient, project_id: str, worker_name: str) -> None:
     response = client.release_reason(project_id, worker_name)
     if not response.ok and response.status_code not in (403, 409):
@@ -227,7 +255,10 @@ def write_conclude_result_with_fact_id(
 ) -> ConcludeWriteResult:
     effective_report = report
     if not report_is_present(effective_report):
-        effective_report = build_fallback_report_from_conclusion(description)
+        effective_report = build_fallback_report_from_conclusion(
+            description,
+            source_context=_source_context_for_intent(client, project_id, intent_id),
+        )
 
     response = client.conclude(project_id, intent_id, worker_name, description, effective_report)
     if response.ok:

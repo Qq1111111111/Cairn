@@ -7,7 +7,11 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from cairn.reporting import build_fallback_report_from_conclusion
+from cairn.reporting import (
+    build_code_evidence_excerpt,
+    build_fallback_report_from_conclusion,
+    finding_prefers_code_evidence,
+)
 from cairn.server.models import Intent, ProjectMeta, ProjectReason, Report
 
 
@@ -221,6 +225,40 @@ def _report_source_label(
     return f"来自结论 {intent_id} → {fact_id}，来源事实：{source}"
 
 
+def _source_context_from_facts(
+    fact_descriptions: dict[str, str],
+    source_fact_ids: list[str],
+) -> list[str]:
+    context: list[str] = []
+    for source_id in source_fact_ids:
+        description = fact_descriptions.get(source_id, "").strip()
+        if description:
+            context.append(description)
+    return context
+
+
+def _source_context_from_request_packet(raw_request: str | None) -> list[str]:
+    if not raw_request:
+        return []
+    try:
+        parsed = json.loads(raw_request)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    source_facts = parsed.get("source_facts")
+    if not isinstance(source_facts, list):
+        return []
+    context: list[str] = []
+    for source in source_facts:
+        if not isinstance(source, dict):
+            continue
+        description = _report_text(source.get("description"))
+        if description:
+            context.append(description)
+    return context
+
+
 def _normalize_report_evidence(raw: Any) -> list[dict[str, Any]]:
     if raw is None:
         return []
@@ -278,7 +316,71 @@ def _normalize_report_evidence(raw: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _normalize_report_findings(raw: Any, fallback_source: str) -> list[dict[str, Any]]:
+def _has_packet_evidence(evidence: list[dict[str, Any]]) -> bool:
+    return any(item.get("request_packet") or item.get("response_packet") for item in evidence)
+
+
+def _compact_report_text(value: str | None) -> str:
+    return " ".join((value or "").split()).strip()
+
+
+def _evidence_looks_like_conclusion(
+    evidence: list[dict[str, Any]],
+    finding_text: str | None,
+) -> bool:
+    if not evidence:
+        return True
+    if len(evidence) != 1:
+        return False
+    item = evidence[0]
+    if item.get("request_packet") or item.get("response_packet"):
+        return False
+    label = _compact_report_text(_report_text(item.get("label"))).lower()
+    content = _compact_report_text(_report_text(item.get("content")))
+    finding = _compact_report_text(finding_text)
+    if label in {"结论原文", "结论", "发现原文", "原文摘录"}:
+        return True
+    if content and finding:
+        return content == finding or content in finding or finding in content
+    return False
+
+
+def _enrich_report_evidence(
+    finding: dict[str, Any],
+    source_context: list[str] | None,
+) -> list[dict[str, Any]]:
+    evidence = finding.get("evidence")
+    normalized = evidence if isinstance(evidence, list) else []
+    if _has_packet_evidence(normalized):
+        return normalized
+    if not finding_prefers_code_evidence(
+        title=_report_text(finding.get("title")),
+        finding_type=_report_text(finding.get("type")),
+        finding_text=_report_text(finding.get("finding")),
+    ):
+        return normalized
+    if normalized and not _evidence_looks_like_conclusion(
+        normalized,
+        _report_text(finding.get("finding")),
+    ):
+        return normalized
+
+    excerpt = build_code_evidence_excerpt(
+        finding_text=_report_text(finding.get("finding")) or "",
+        asset=_report_text(finding.get("asset")),
+        endpoint=_report_text(finding.get("endpoint")),
+        source_context=source_context,
+    )
+    if not excerpt:
+        return normalized
+    return [{"kind": "code", "label": "源码上下文", "content": excerpt}]
+
+
+def _normalize_report_findings(
+    raw: Any,
+    fallback_source: str,
+    source_context: list[str] | None = None,
+) -> list[dict[str, Any]]:
     if isinstance(raw, dict):
         candidates = [raw]
     elif isinstance(raw, list):
@@ -314,33 +416,33 @@ def _normalize_report_findings(raw: Any, fallback_source: str) -> list[dict[str,
         )
         evidence.extend(direct_evidence)
 
-        findings.append(
-            {
-                "title": title,
-                "asset": _report_text(candidate.get("asset") or candidate.get("target")),
-                "endpoint": _report_text(
-                    candidate.get("endpoint")
-                    or candidate.get("uri")
-                    or candidate.get("path")
-                ),
-                "source": _report_text(candidate.get("source")) or fallback_source,
-                "type": _report_text(
-                    candidate.get("type") or candidate.get("category") or candidate.get("kind")
-                ),
-                "status": _report_text(candidate.get("status")) or "已确认",
-                "severity": _report_text(
-                    candidate.get("severity") or candidate.get("risk")
-                )
-                or "待定",
-                "finding": finding_text or title,
-                "fix": _report_text(
-                    candidate.get("fix")
-                    or candidate.get("remediation")
-                    or candidate.get("recommendation")
-                ),
-                "evidence": evidence,
-            }
-        )
+        finding = {
+            "title": title,
+            "asset": _report_text(candidate.get("asset") or candidate.get("target")),
+            "endpoint": _report_text(
+                candidate.get("endpoint")
+                or candidate.get("uri")
+                or candidate.get("path")
+            ),
+            "source": _report_text(candidate.get("source")) or fallback_source,
+            "type": _report_text(
+                candidate.get("type") or candidate.get("category") or candidate.get("kind")
+            ),
+            "status": _report_text(candidate.get("status")) or "已确认",
+            "severity": _report_text(
+                candidate.get("severity") or candidate.get("risk")
+            )
+            or "待定",
+            "finding": finding_text or title,
+            "fix": _report_text(
+                candidate.get("fix")
+                or candidate.get("remediation")
+                or candidate.get("recommendation")
+            ),
+            "evidence": evidence,
+        }
+        finding["evidence"] = _enrich_report_evidence(finding, source_context)
+        findings.append(finding)
     return findings
 
 
@@ -349,6 +451,7 @@ def normalize_report_payload(
     *,
     fallback_summary: str,
     fallback_source: str,
+    source_context: list[str] | None = None,
 ) -> dict[str, Any]:
     report = raw
     summary = fallback_summary
@@ -377,6 +480,7 @@ def normalize_report_payload(
             or report.get("vulnerabilities")
             or report.get("items"),
             fallback_source,
+            source_context,
         )
         if not findings and any(
             key in report
@@ -389,28 +493,32 @@ def normalize_report_payload(
                 "response_packet",
             )
         ):
-            findings = _normalize_report_findings(report, fallback_source)
+            findings = _normalize_report_findings(
+                report,
+                fallback_source,
+                source_context,
+            )
     elif isinstance(report, list):
-        findings = _normalize_report_findings(report, fallback_source)
+        findings = _normalize_report_findings(report, fallback_source, source_context)
     else:
         summary = _report_text(report) or summary
 
     if not findings:
         finding_summary = summary or fallback_summary
-        findings = [
-            {
-                "title": _report_title_from_summary(finding_summary),
-                "asset": None,
-                "endpoint": None,
-                "source": fallback_source,
-                "type": None,
-                "status": "已确认",
-                "severity": "待定",
-                "finding": finding_summary,
-                "fix": None,
-                "evidence": [],
-            }
-        ]
+        finding = {
+            "title": _report_title_from_summary(finding_summary),
+            "asset": None,
+            "endpoint": None,
+            "source": fallback_source,
+            "type": None,
+            "status": "已确认",
+            "severity": "待定",
+            "finding": finding_summary,
+            "fix": None,
+            "evidence": [],
+        }
+        finding["evidence"] = _enrich_report_evidence(finding, source_context)
+        findings = [finding]
 
     return {
         "type": "conclude_report",
@@ -481,10 +589,12 @@ def build_conclude_report_packets(
     fallback_source = _report_source_label(
         intent_row["id"], fact_id, source_fact_ids
     )
+    source_context = _source_context_from_facts(fact_descriptions, source_fact_ids)
     response_payload = normalize_report_payload(
         raw_report,
         fallback_summary=conclusion_description,
         fallback_source=fallback_source,
+        source_context=source_context,
     )
     response_payload["report_id"] = report_id
     response_payload["project_id"] = project_row["id"]
@@ -518,12 +628,14 @@ def report_to_model(row: sqlite3.Row) -> Report:
     fallback_summary = _report_summary_from_packet(
         parsed_response, raw_response or "结论报告"
     )
+    source_context = _source_context_from_request_packet(row["request_packet"])
     payload = normalize_report_payload(
         parsed_response,
         fallback_summary=fallback_summary,
         fallback_source=_report_source_label(
             row["intent_id"], row["fact_id"], source_fact_ids
         ),
+        source_context=source_context,
     )
     return Report(
         id=row["id"],
@@ -572,14 +684,18 @@ def build_reports(conn: sqlite3.Connection, project_id: str) -> list[Report]:
         if not fact_id:
             continue
         conclusion_description = fact_descriptions.get(fact_id, "")
-        raw_report = build_fallback_report_from_conclusion(conclusion_description)
-        if raw_report is None:
-            continue
         source_rows = conn.execute(
             "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
             (intent_row["id"], project_id),
         ).fetchall()
         source_fact_ids = [row["fact_id"] for row in source_rows]
+        source_context = _source_context_from_facts(fact_descriptions, source_fact_ids)
+        raw_report = build_fallback_report_from_conclusion(
+            conclusion_description,
+            source_context=source_context,
+        )
+        if raw_report is None:
+            continue
         request_packet, response_packet = build_conclude_report_packets(
             report_id=f"auto_{intent_row['id']}",
             project_row=project_row,
@@ -598,6 +714,7 @@ def build_reports(conn: sqlite3.Connection, project_id: str) -> list[Report]:
             fallback_source=_report_source_label(
                 intent_row["id"], fact_id, source_fact_ids
             ),
+            source_context=source_context,
         )
         reports.append(
             Report(

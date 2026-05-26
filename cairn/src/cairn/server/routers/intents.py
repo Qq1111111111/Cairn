@@ -161,7 +161,15 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
 
         raw_report = body.report
         if not report_is_present(raw_report):
-            raw_report = build_fallback_report_from_conclusion(body.description)
+            source_context = [
+                fact_descriptions[source_id]
+                for source_id in source_fact_ids
+                if fact_descriptions.get(source_id)
+            ]
+            raw_report = build_fallback_report_from_conclusion(
+                body.description,
+                source_context=source_context,
+            )
 
         if report_is_present(raw_report):
             try:
