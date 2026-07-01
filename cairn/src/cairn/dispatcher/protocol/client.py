@@ -34,9 +34,18 @@ class ApiResult:
 
 
 class CairnClient:
-    def __init__(self, base_url: str, timeout: float = 10.0):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 10.0,
+        *,
+        auth_username: str | None = None,
+        auth_password: str | None = None,
+    ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._auth_username = auth_username
+        self._auth_password = auth_password
         self._summary_adapter = TypeAdapter(list[ProjectSummary])
         self._local = threading.local()
         self._sessions: dict[int, requests.Session] = {}
@@ -48,6 +57,18 @@ class CairnClient:
             self._sessions.clear()
         for session in sessions:
             session.close()
+
+    def authenticate(self) -> None:
+        if os.getenv("CAIRN_INTERNAL_TOKEN"):
+            return
+        if not self._auth_username or not self._auth_password:
+            return
+        response = self._session().post(
+            self._url("/auth/login"),
+            json={"username": self._auth_username, "password": self._auth_password},
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
 
     def list_projects(self) -> list[ProjectSummary]:
         response = self._session().get(self._url("/projects"), timeout=self._timeout)
