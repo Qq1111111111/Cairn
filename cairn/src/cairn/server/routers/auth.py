@@ -1,61 +1,25 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request, Response
 
-from cairn.server.auth import (
-    AuthLoginError,
-    build_auth_status,
-    clear_auth_cookie,
-    extract_session_token,
-    login_with_password,
-    logout_with_token,
-    set_auth_cookie,
-)
-from cairn.server.db import get_conn
-from cairn.server.models import AuthLoginRequest, AuthStatus
+from cairn.server.auth import AUTH
+from cairn.server.models import LoginRequest, SessionResponse
 
 router = APIRouter(tags=["auth"])
 
 
-@router.get("/auth/me", response_model=AuthStatus)
-def auth_me(request: Request):
-    with get_conn() as conn:
-        enabled = bool(getattr(request.app.state, "auth_enabled", False))
-        return build_auth_status(
-            conn,
-            enabled=enabled,
-            session_token=extract_session_token(request),
-        )
+@router.get("/auth/session", response_model=SessionResponse)
+def get_session(request: Request):
+    return SessionResponse(**AUTH.session_payload(request))
 
 
-@router.post("/auth/login", response_model=AuthStatus)
-def auth_login(body: AuthLoginRequest, request: Request, response: Response):
-    enabled = bool(getattr(request.app.state, "auth_enabled", False))
-    if not enabled:
-        return AuthStatus(enabled=False, authenticated=True)
-
-    with get_conn() as conn:
-        try:
-            status, session_token = login_with_password(
-                conn,
-                username=body.username,
-                password=body.password,
-            )
-        except AuthLoginError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-
-        set_auth_cookie(response, session_token)
-        return status
+@router.post("/auth/login", response_model=SessionResponse)
+def login(body: LoginRequest, request: Request, response: Response):
+    username = AUTH.login(request, response, body.username, body.password)
+    return SessionResponse(enabled=AUTH.enabled, authenticated=True, username=username)
 
 
-@router.post("/auth/logout", response_model=AuthStatus)
-def auth_logout(request: Request, response: Response):
-    enabled = bool(getattr(request.app.state, "auth_enabled", False))
-    with get_conn() as conn:
-        status = logout_with_token(
-            conn,
-            enabled=enabled,
-            session_token=extract_session_token(request),
-        )
-    clear_auth_cookie(response)
-    return status
+@router.post("/auth/logout", response_model=SessionResponse)
+def logout(request: Request, response: Response):
+    AUTH.logout(request, response)
+    return SessionResponse(enabled=AUTH.enabled, authenticated=False, username=None)

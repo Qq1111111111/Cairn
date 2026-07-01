@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '未分类',
     status TEXT NOT NULL DEFAULT 'active',
+    bootstrap_enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     reason_worker TEXT,
     reason_trigger TEXT,
@@ -51,6 +53,23 @@ CREATE TABLE IF NOT EXISTS facts (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     description TEXT NOT NULL,
     PRIMARY KEY (id, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS fact_provenance (
+    project_id TEXT NOT NULL,
+    fact_id TEXT NOT NULL,
+    scheme TEXT,
+    host TEXT,
+    port INTEGER,
+    method TEXT,
+    path TEXT,
+    url TEXT,
+    interface_label TEXT,
+    repro_command TEXT,
+    evidence_files_json TEXT NOT NULL DEFAULT '[]',
+    traffic_ids_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (project_id, fact_id),
+    FOREIGN KEY (fact_id, project_id) REFERENCES facts(id, project_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS intents (
@@ -111,6 +130,36 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
     value INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, kind)
 );
+
+CREATE TABLE IF NOT EXISTS timeline_prompts (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    timeline_entry_id TEXT NOT NULL,
+    intent_id TEXT,
+    phase TEXT NOT NULL,
+    worker TEXT NOT NULL,
+    prompt_text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, timeline_entry_id),
+    FOREIGN KEY (intent_id, project_id) REFERENCES intents(id, project_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    session_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    user_agent TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS auth_login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -122,6 +171,22 @@ def configure(path: Path) -> None:
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _ensure_project_columns(conn)
+
+
+def _ensure_project_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
+    if "category" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN category TEXT NOT NULL DEFAULT '未分类'")
+    if "bootstrap_enabled" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN bootstrap_enabled INTEGER NOT NULL DEFAULT 1")
+        if "bootstrap_mode" in columns:
+            conn.execute(
+                "UPDATE projects SET bootstrap_enabled = CASE WHEN bootstrap_mode = 'disabled' THEN 0 ELSE 1 END"
+            )
+    conn.execute(
+        "UPDATE projects SET category = '未分类' WHERE category IS NULL OR trim(category) = ''"
+    )
 
 
 @contextmanager

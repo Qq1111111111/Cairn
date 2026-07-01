@@ -18,6 +18,7 @@ from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.dispatcher.tasks.bootstrap import run_bootstrap_task
 from cairn.dispatcher.tasks.explore import run_explore_task
 from cairn.dispatcher.tasks.reason import run_reason_task
+from cairn.server.project_files import project_files_root
 from cairn.server.models import Intent, ProjectDetail, ProjectSummary
 
 LOG = logging.getLogger(__name__)
@@ -108,12 +109,16 @@ class DispatcherLoop:
 
     def run_startup_healthchecks_only(self) -> None:
         try:
-            self.run_startup_healthchecks(show_commands=True)
+            self.run_startup_healthchecks(show_commands=True, force=True)
         finally:
             self.close()
 
-    def run_startup_healthchecks(self, *, show_commands: bool = False) -> None:
+    def run_startup_healthchecks(self, *, show_commands: bool = False, force: bool = False) -> None:
         if self._startup_healthchecks_checked:
+            return
+        if not force and self.config.runtime.worker_healthcheck == "disabled":
+            LOG.info("skip startup worker healthchecks because runtime.worker_healthcheck=disabled")
+            self._startup_healthchecks_checked = True
             return
         self._run_startup_healthchecks(show_commands=show_commands)
         self._startup_healthchecks_checked = True
@@ -216,7 +221,15 @@ class DispatcherLoop:
         if self._is_initial_project(project):
             if project.project.reason is not None:
                 return False
-            return self._dispatch_initial_project(project)
+            if self._project_requires_bootstrap(project):
+                return self._dispatch_initial_project(project)
+            export_yaml = self.client.export_project(summary.id)
+            return self._dispatch_reason(project, export_yaml, "initial")
+        if project.project.reason is None:
+            reason_trigger = self._reason_trigger(project)
+            if reason_trigger is not None:
+                export_yaml = self.client.export_project(summary.id)
+                return self._dispatch_reason(project, export_yaml, reason_trigger)
         running_intent_ids = self._project_running_explore_intents(summary.id)
         unclaimed_intents = [
             intent
@@ -247,21 +260,17 @@ class DispatcherLoop:
                 project.project.reason.worker,
             )
             return False
-        reason_trigger = self._reason_trigger(project)
-        if reason_trigger is None:
-            self._log_changed(
-                f"{skip_scope}:graph_unchanged",
-                logging.DEBUG,
-                "skip reason project=%s because reason state unchanged facts=%s hints=%s open_intents=%s intents=%s",
-                summary.id,
-                len(project.facts),
-                len(project.hints),
-                self._project_open_intent_count(project),
-                len(project.intents),
-            )
-            return False
-        export_yaml = self.client.export_project(summary.id)
-        return self._dispatch_reason(project, export_yaml, reason_trigger)
+        self._log_changed(
+            f"{skip_scope}:graph_unchanged",
+            logging.DEBUG,
+            "skip reason project=%s because reason state unchanged facts=%s hints=%s open_intents=%s intents=%s",
+            summary.id,
+            len(project.facts),
+            len(project.hints),
+            self._project_open_intent_count(project),
+            len(project.intents),
+        )
+        return False
 
     def _dispatch_initial_project(self, project: ProjectDetail) -> bool:
         intent = self._get_bootstrap_intent(project)
@@ -595,6 +604,13 @@ class DispatcherLoop:
             return True
         return all(self._is_bootstrap_intent(intent) for intent in project.intents)
 
+    def _project_requires_bootstrap(self, project: ProjectDetail) -> bool:
+        if not project.project.bootstrap_enabled:
+            return False
+        if self._get_bootstrap_intent(project) is not None:
+            return True
+        return any("bootstrap" in worker.task_types for worker in self.config.workers)
+
     def _create_bootstrap_intent(self, project_id: str) -> Intent | None:
         response = self.client.create_intent(
             project_id,
@@ -735,6 +751,48 @@ class DispatcherLoop:
     def _queue_container_cleanups(self, summaries: list[ProjectSummary]) -> None:
         self._cleanup_completed_containers(summaries)
         self._cleanup_stopped_containers(summaries)
+        self._cleanup_orphan_containers(summaries)
+        self._cleanup_orphan_project_files(summaries)
+
+    def _cleanup_orphan_containers(self, summaries: list[ProjectSummary]) -> None:
+        expected = {
+            self.container_manager.container_name(summary.id)
+            for summary in summaries
+        }
+        expected.update(
+            self.container_manager.container_name(task.project_id)
+            for task in self.futures.values()
+        )
+        for name in self.container_manager.managed_container_names():
+            if name in expected or name in self._cleanup_pending:
+                continue
+            if not self.container_manager.needs_orphan_cleanup(name):
+                continue
+            future = self.cleanup_executor.submit(self.container_manager.cleanup_orphan, name)
+            self.cleanup_futures[future] = (name, None, None)
+            self._cleanup_pending.add(name)
+
+    def _cleanup_orphan_project_files(self, summaries: list[ProjectSummary]) -> None:
+        roots = self.config.container.traffic_mirror_dir or self.config.container.artifact_mirror_dir
+        if roots is None:
+            return
+        root = project_files_root() if roots is None else roots
+        if not root.exists():
+            return
+        active_project_ids = {summary.id for summary in summaries}
+        active_project_ids.update(task.project_id for task in self.futures.values())
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            if child.name in active_project_ids:
+                continue
+            try:
+                import shutil
+
+                shutil.rmtree(child)
+                LOG.info("removed orphan project files project=%s path=%s", child.name, child)
+            except Exception:
+                LOG.exception("failed to remove orphan project files project=%s path=%s", child.name, child)
 
     def _reap_cleanup_futures(self) -> None:
         done = [future for future in self.cleanup_futures if future.done()]

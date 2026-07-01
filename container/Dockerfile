@@ -10,12 +10,12 @@ RUN useradd -m -s /bin/bash kali && \
 USER kali
 
 RUN sudo apt update && \
-    sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
+    sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap tcpdump \
     bloodyad coercer enum4linux-ng pwncat chisel-common-binaries \
     dirsearch yq krb5-user gitleaks naabu nikto netexec adb && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
-    pip3 install pwntools pymongo --break-system-packages && \
+    pip3 install pwntools pymongo mitmproxy --break-system-packages && \
     sudo npm install -g @playwright/cli@latest && \
     cd /tmp && playwright-cli install
 
@@ -61,6 +61,9 @@ RUN cd /tmp && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/*
     
+RUN pip3 install tccli awscli --break-system-packages && \
+    sudo bash -c "$(curl -fsSL https://aliyuncli.alicdn.com/install.sh)"
+
 RUN sudo npm install -g @openai/codex@0.118.0
 RUN sudo npm install -g @anthropic-ai/claude-code@2.1.98
 RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0

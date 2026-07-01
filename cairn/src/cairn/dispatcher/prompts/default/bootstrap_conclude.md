@@ -13,15 +13,8 @@ When rejecting a task, return the following (under no circumstances should you r
 
 Normal return example:
 ```json
-{"accepted": true, "data": {"fact": {"description": "..."}}}
+{"accepted": true, "data": {"fact": {"description": "...", "provenance": {"host": "example.com", "method": "GET", "path": "/api", "url": "https://example.com/api", "evidence_files": ["/home/kali/workspace/result.json"], "repro_command": "curl ..."}}}}
 ```
-
-If the confirmed result contains one or more security findings, you must add a sidecar `report`.
-This report is stored only for UI/reporting and is not inserted back into the graph context. Put every distinct vulnerability in `report.findings`, and use evidence types that match the finding:
-- `kind: "packet"` for HTTP request/response proof.
-- `kind: "code"` for source code, configuration, leaked endpoint lists, or other raw excerpts.
-- Do not force file/code findings into request/response packets.
-- Include `report` whenever the result confirms at least one security finding. If the result is only a tentative guess, an unverified suspicion, or confirms no security issue, omit `report`.
 
 ## Rules
 - Stop immediately and produce the JSON now. Do not continue the task.
@@ -29,8 +22,10 @@ This report is stored only for UI/reporting and is not inserted back into the gr
 - Base your answer only on information that has already been confirmed before this conclude prompt. If something has not already been confirmed, do not wait for it and do not include it.
 - This JSON summary is your final output for this phase. After outputting it, stop.
 - Do not output `complete` in this phase. Even if Goal is not achieved or you want to explain status, put that information into `fact.description` only.
-- `fact.description` must be an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler. When multiple confirmed points exist, separate them into short paragraphs or line-broken sections instead of one dense paragraph.
+- `fact.description` must be an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler.
+- When `fact.description` depends on a specific interface, request, or saved artifact, include `fact.provenance`. Prefer these keys when known: `scheme`, `host`, `port`, `method`, `path`, `url`, `interface_label`, `repro_command`, `evidence_files`, `traffic_ids`.
 - Do not put long data blobs in `fact.description`. Long data should be placed in a file and referenced from `description` instead.
+- Write `fact.description` in Simplified Chinese. You may keep necessary technical tokens unchanged, such as IPs, domains, URLs, file paths, commands, payload fragments, protocol names, and fact IDs.
 
 # Context
 ## Origin

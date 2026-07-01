@@ -1,24 +1,27 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path, PurePosixPath
+import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
 
-from cairn.dispatcher.config import WorkerConfig
-from cairn.dispatcher.notifications import notify_dingtalk_report
+from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.runtime.process import ProcessResult
-from cairn.reporting import build_fallback_report_from_conclusion, report_is_present
 
 HEALTHCHECK_COMMUNICATE_GRACE_SECONDS = 10
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
 GRAPH_SNAPSHOT_ROOT = "/tmp/cairn-prompts"
+WORKSPACE_ARTIFACT_ROOT = PurePosixPath("/home/kali/workspace")
+TRAFFIC_CONTAINER_ROOT = PurePosixPath("/home/kali/workspace/.cairn/traffic")
+ARTIFACT_PATH_PATTERN = re.compile(r"(?P<path>/[^\s<>'\"`]+)")
+ARTIFACT_PATH_TRAILING_CHARS = ".,;:!?)]}\"'"
 LOG = logging.getLogger(__name__)
 
 
@@ -57,6 +60,10 @@ def communicate_timeout(timeout_seconds: int, grace_seconds: int = PROCESS_COMMU
     return timeout_seconds + grace_seconds
 
 
+def task_healthcheck_enabled(config: DispatchConfig) -> bool:
+    return config.runtime.worker_healthcheck == "startup_and_task"
+
+
 def write_graph_snapshot_reference(
     container_manager: ContainerManager,
     container_name: str,
@@ -84,9 +91,11 @@ def run_healthcheck(
     lease: HeartbeatLease | None = None,
     cancellation: TaskCancellation | None = None,
 ) -> HealthcheckRun:
+    env = dict(worker.env)
+    env.update(container_manager.traffic_proxy_env())
     process = container_manager.build_exec_process(
         container_name,
-        dict(worker.env),
+        env,
         command,
         timeout_seconds=timeout_seconds,
     )
@@ -125,9 +134,11 @@ def run_worker_process(
         phase,
         timeout_seconds,
     )
+    env = dict(worker.env)
+    env.update(container_manager.traffic_proxy_env())
     process = container_manager.build_exec_process(
         container_name,
-        dict(worker.env),
+        env,
         argv,
         timeout_seconds=timeout_seconds,
     )
@@ -159,34 +170,6 @@ def project_allows_conclude_fallback(client: CairnClient, project_id: str, *, wo
     return False
 
 
-def _source_context_for_intent(
-    client: CairnClient,
-    project_id: str,
-    intent_id: str,
-) -> list[str]:
-    try:
-        project = client.get_project(project_id)
-    except Exception as exc:
-        LOG.info(
-            "fallback report source context unavailable project=%s intent=%s error=%s",
-            project_id,
-            intent_id,
-            exc,
-        )
-        return []
-    facts = {fact.id: fact.description for fact in project.facts}
-    source_ids: list[str] = []
-    for intent in project.intents:
-        if intent.id == intent_id:
-            source_ids = list(intent.from_)
-            break
-    return [
-        facts[source_id]
-        for source_id in source_ids
-        if facts.get(source_id)
-    ]
-
-
 def best_effort_release_reason(client: CairnClient, project_id: str, worker_name: str) -> None:
     response = client.release_reason(project_id, worker_name)
     if not response.ok and response.status_code not in (403, 409):
@@ -207,6 +190,53 @@ def best_effort_release_reason(client: CairnClient, project_id: str, worker_name
         )
 
 
+def record_timeline_prompt(
+    client: CairnClient,
+    project_id: str,
+    timeline_entry_id: str,
+    prompt_text: str,
+    phase: str,
+    worker_name: str,
+    *,
+    intent_id: str | None = None,
+) -> None:
+    response = client.record_timeline_prompt(
+        project_id,
+        timeline_entry_id,
+        prompt_text,
+        phase,
+        worker_name,
+        intent_id=intent_id,
+    )
+    if response.ok:
+        LOG.info(
+            "timeline prompt recorded project=%s entry=%s worker=%s phase=%s",
+            project_id,
+            timeline_entry_id,
+            worker_name,
+            phase,
+        )
+        return
+    if response.status_code == 403:
+        LOG.info(
+            "timeline prompt skipped because project is inactive project=%s entry=%s worker=%s phase=%s",
+            project_id,
+            timeline_entry_id,
+            worker_name,
+            phase,
+        )
+        return
+    LOG.warning(
+        "timeline prompt write failed project=%s entry=%s worker=%s phase=%s status=%s body=%s",
+        project_id,
+        timeline_entry_id,
+        worker_name,
+        phase,
+        response.status_code,
+        response.text,
+    )
+
+
 def write_conclude_result(
     client: CairnClient,
     project_id: str,
@@ -214,13 +244,14 @@ def write_conclude_result(
     worker_name: str,
     description: str,
     *,
-    report: Any | None = None,
-    dingtalk_enabled: bool = True,
-    dingtalk_webhook: str | None = None,
-    dingtalk_secret: str | None = None,
+    prompt_text: str,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
+    provenance: dict[str, object] | None = None,
+    container_manager: ContainerManager | None = None,
+    container_name: str | None = None,
+    artifact_mirror_dir: Path | None = None,
 ) -> str:
     return write_conclude_result_with_fact_id(
         client,
@@ -228,13 +259,14 @@ def write_conclude_result(
         intent_id,
         worker_name,
         description,
-        report=report,
-        dingtalk_enabled=dingtalk_enabled,
-        dingtalk_webhook=dingtalk_webhook,
-        dingtalk_secret=dingtalk_secret,
+        prompt_text=prompt_text,
         source=source,
         phase_ms=phase_ms,
         total_ms=total_ms,
+        provenance=provenance,
+        container_manager=container_manager,
+        container_name=container_name,
+        artifact_mirror_dir=artifact_mirror_dir,
     ).status
 
 
@@ -245,22 +277,27 @@ def write_conclude_result_with_fact_id(
     worker_name: str,
     description: str,
     *,
-    report: Any | None = None,
-    dingtalk_enabled: bool = True,
-    dingtalk_webhook: str | None = None,
-    dingtalk_secret: str | None = None,
+    prompt_text: str,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
+    provenance: dict[str, object] | None = None,
+    container_manager: ContainerManager | None = None,
+    container_name: str | None = None,
+    artifact_mirror_dir: Path | None = None,
 ) -> ConcludeWriteResult:
-    effective_report = report
-    if not report_is_present(effective_report):
-        effective_report = build_fallback_report_from_conclusion(
-            description,
-            source_context=_source_context_for_intent(client, project_id, intent_id),
-        )
-
-    response = client.conclude(project_id, intent_id, worker_name, description, effective_report)
+    normalized_provenance = normalize_conclude_provenance(
+        provenance=provenance,
+        project_id=project_id,
+        intent_id=intent_id,
+    )
+    response = client.conclude(
+        project_id,
+        intent_id,
+        worker_name,
+        description,
+        provenance=normalized_provenance,
+    )
     if response.ok:
         fact_id: str | None = None
         if isinstance(response.data, dict):
@@ -269,6 +306,31 @@ def write_conclude_result_with_fact_id(
                 candidate = fact.get("id")
                 if isinstance(candidate, str) and candidate:
                     fact_id = candidate
+        record_timeline_prompt(
+            client,
+            project_id,
+            f"intent-concluded-{intent_id}",
+            prompt_text,
+            source,
+            worker_name,
+            intent_id=intent_id,
+        )
+        mirror_referenced_artifacts(
+            container_manager=container_manager,
+            container_name=container_name,
+            artifact_mirror_dir=artifact_mirror_dir,
+            project_id=project_id,
+            intent_id=intent_id,
+            description=description,
+        )
+        mirror_provenance_artifacts(
+            container_manager=container_manager,
+            container_name=container_name,
+            artifact_mirror_dir=artifact_mirror_dir,
+            project_id=project_id,
+            intent_id=intent_id,
+            provenance=provenance,
+        )
         if total_ms is None:
             LOG.info(
                 "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s",
@@ -287,18 +349,6 @@ def write_conclude_result_with_fact_id(
                 source,
                 phase_ms,
                 total_ms,
-            )
-        if report_is_present(effective_report):
-            notify_dingtalk_report(
-                enabled=dingtalk_enabled,
-                webhook=dingtalk_webhook,
-                secret=dingtalk_secret,
-                project_id=project_id,
-                intent_id=intent_id,
-                fact_id=fact_id,
-                worker_name=worker_name,
-                source=source,
-                report=effective_report,
             )
         return ConcludeWriteResult(status="success", fact_id=fact_id)
     if response.status_code == 403:
@@ -319,6 +369,159 @@ def write_conclude_result_with_fact_id(
         )
     best_effort_release(client, project_id, intent_id, worker_name)
     return ConcludeWriteResult(status="failed", fact_id=None)
+
+
+def mirror_referenced_artifacts(
+    *,
+    container_manager: ContainerManager | None,
+    container_name: str | None,
+    artifact_mirror_dir: Path | None,
+    project_id: str,
+    intent_id: str,
+    description: str,
+) -> None:
+    if container_manager is None or container_name is None or artifact_mirror_dir is None:
+        return
+    for source_path in extract_workspace_artifact_paths(description):
+        destination = artifact_mirror_destination(artifact_mirror_dir, project_id, intent_id, source_path)
+        try:
+            copied = container_manager.copy_file_to_host(container_name, source_path, destination)
+        except Exception as exc:
+            LOG.warning(
+                "artifact mirror failed project=%s intent=%s container_path=%s host_path=%s error=%s",
+                project_id,
+                intent_id,
+                source_path,
+                destination,
+                exc,
+            )
+            continue
+        if copied:
+            LOG.info(
+                "artifact mirrored project=%s intent=%s container_path=%s host_path=%s",
+                project_id,
+                intent_id,
+                source_path,
+                destination,
+            )
+        else:
+            LOG.warning(
+                "artifact referenced but unavailable project=%s intent=%s container_path=%s",
+                project_id,
+                intent_id,
+                source_path,
+            )
+
+
+def extract_workspace_artifact_paths(text: str) -> list[str]:
+    matches: list[str] = []
+    seen: set[str] = set()
+    workspace_prefix = f"{WORKSPACE_ARTIFACT_ROOT}/"
+    for match in ARTIFACT_PATH_PATTERN.finditer(text):
+        candidate = match.group("path").rstrip(ARTIFACT_PATH_TRAILING_CHARS)
+        if not candidate.startswith(workspace_prefix):
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        matches.append(candidate)
+    return matches
+
+
+def artifact_mirror_destination(artifact_mirror_dir: Path, project_id: str, intent_id: str, source_path: str) -> Path:
+    source = PurePosixPath(source_path)
+    relative = source.relative_to(WORKSPACE_ARTIFACT_ROOT)
+    return artifact_mirror_dir / project_id / intent_id / Path(*relative.parts)
+
+
+def artifact_project_relative_path(intent_id: str, source_path: str) -> str:
+    source = PurePosixPath(source_path)
+    relative = source.relative_to(WORKSPACE_ARTIFACT_ROOT)
+    return (Path(intent_id) / Path(*relative.parts)).as_posix()
+
+
+def normalize_conclude_provenance(
+    *,
+    provenance: dict[str, object] | None,
+    project_id: str,
+    intent_id: str,
+) -> dict[str, object] | None:
+    if provenance is None:
+        return None
+    normalized = dict(provenance)
+    evidence_files = normalized.get("evidence_files")
+    if isinstance(evidence_files, list):
+        rewritten: list[str] = []
+        for item in evidence_files:
+            if not isinstance(item, str):
+                continue
+            if item.startswith(f"{WORKSPACE_ARTIFACT_ROOT}/"):
+                rewritten.append(artifact_project_relative_path(intent_id, item))
+            else:
+                rewritten.append(item)
+        normalized["evidence_files"] = rewritten
+    return normalized
+
+
+def mirror_provenance_artifacts(
+    *,
+    container_manager: ContainerManager | None,
+    container_name: str | None,
+    artifact_mirror_dir: Path | None,
+    project_id: str,
+    intent_id: str,
+    provenance: dict[str, object] | None,
+) -> None:
+    if provenance is None:
+        return
+    evidence_files = provenance.get("evidence_files")
+    if not isinstance(evidence_files, list):
+        return
+    description = "\n".join(item for item in evidence_files if isinstance(item, str))
+    if not description:
+        return
+    mirror_referenced_artifacts(
+        container_manager=container_manager,
+        container_name=container_name,
+        artifact_mirror_dir=artifact_mirror_dir,
+        project_id=project_id,
+        intent_id=intent_id,
+        description=description,
+    )
+
+
+def sync_project_traffic(
+    *,
+    container_manager: ContainerManager,
+    container_name: str,
+    traffic_mirror_dir: Path | None,
+    project_id: str,
+) -> None:
+    if traffic_mirror_dir is None:
+        return
+    destination = traffic_mirror_dir / project_id / "traffic"
+    try:
+        copied = container_manager.copy_path_to_host(
+            container_name,
+            str(TRAFFIC_CONTAINER_ROOT),
+            destination,
+        )
+    except Exception as exc:
+        LOG.warning(
+            "traffic mirror failed project=%s container=%s host_path=%s error=%s",
+            project_id,
+            container_name,
+            destination,
+            exc,
+        )
+        return
+    if copied:
+        LOG.info(
+            "traffic mirrored project=%s container=%s host_path=%s",
+            project_id,
+            container_name,
+            destination,
+        )
 
 
 def best_effort_release(client: CairnClient, project_id: str, intent_id: str, worker_name: str) -> None:

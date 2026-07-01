@@ -1,9 +1,25 @@
 from __future__ import annotations
 
-from typing import Any
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _validate_non_empty_text(value: str) -> str:
+    text = value.strip()
+    if not text:
+        raise ValueError("must not be empty")
+    return text
+
+
+def _validate_chinese_narrative_text(value: str) -> str:
+    text = _validate_non_empty_text(value)
+    if not _CJK_RE.search(text):
+        raise ValueError("must contain Chinese text; technical tokens may be embedded")
+    return text
 
 
 class Settings(BaseModel):
@@ -11,9 +27,43 @@ class Settings(BaseModel):
     reason_timeout: int = Field(ge=5)
 
 
+class FactProvenance(BaseModel):
+    scheme: str | None = None
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    method: str | None = None
+    path: str | None = None
+    url: str | None = None
+    interface_label: str | None = None
+    repro_command: str | None = None
+    evidence_files: list[str] = Field(default_factory=list)
+    traffic_ids: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "scheme",
+        "host",
+        "method",
+        "path",
+        "url",
+        "interface_label",
+        "repro_command",
+    )
+    @classmethod
+    def validate_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_non_empty_text(value)
+
+    @field_validator("evidence_files", "traffic_ids")
+    @classmethod
+    def validate_text_list(cls, value: list[str]) -> list[str]:
+        return [_validate_non_empty_text(item) for item in value]
+
+
 class Fact(BaseModel):
     id: str
     description: str
+    provenance: FactProvenance | None = None
 
 
 class Intent(BaseModel):
@@ -37,64 +87,6 @@ class Hint(BaseModel):
     created_at: str
 
 
-class AuthLoginRequest(BaseModel):
-    username: str
-    password: str
-
-    @field_validator("username", "password")
-    @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
-
-
-class AuthStatus(BaseModel):
-    enabled: bool
-    authenticated: bool
-    username: str | None = None
-    expires_at: str | None = None
-    locked_until: str | None = None
-    message: str | None = None
-
-
-class ReportEvidence(BaseModel):
-    kind: str | None = None
-    label: str | None = None
-    content: str | None = None
-    request_packet: str = ""
-    response_packet: str = ""
-
-
-class ReportFinding(BaseModel):
-    title: str
-    asset: str | None = None
-    endpoint: str | None = None
-    source: str | None = None
-    type: str | None = None
-    status: str | None = None
-    severity: str | None = None
-    finding: str = ""
-    fix: str | None = None
-    evidence: list[ReportEvidence] = Field(default_factory=list)
-
-
-class Report(BaseModel):
-    id: str
-    project_id: str
-    intent_id: str
-    fact_id: str
-    worker: str
-    source_fact_ids: list[str] = Field(default_factory=list)
-    request_packet: str
-    response_packet: str
-    created_at: str
-    title: str = "漏洞报告"
-    summary: str | None = None
-    findings: list[ReportFinding] = Field(default_factory=list)
-
-
 class ProjectReason(BaseModel):
     worker: str
     trigger: str
@@ -105,7 +97,9 @@ class ProjectReason(BaseModel):
 class ProjectMeta(BaseModel):
     id: str
     title: str
+    category: str
     status: Literal["active", "stopped", "completed"]
+    bootstrap_enabled: bool
     created_at: str
     reason: ProjectReason | None = None
 
@@ -123,48 +117,60 @@ class ProjectDetail(BaseModel):
     facts: list[Fact]
     intents: list[Intent]
     hints: list[Hint]
-    reports: list[Report] = Field(default_factory=list)
+    timeline_prompts: list["TimelinePrompt"] = Field(default_factory=list)
+
+
+class TimelinePrompt(BaseModel):
+    timeline_entry_id: str
+    intent_id: str | None = None
+    phase: str
+    worker: str
+    prompt_text: str
+    created_at: str
 
 
 class CreateHintInline(BaseModel):
     content: str
     creator: str
 
-    @field_validator("content", "creator")
+    @field_validator("content")
     @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
+    def validate_content(cls, value: str) -> str:
+        return _validate_chinese_narrative_text(value)
+
+    @field_validator("creator")
+    @classmethod
+    def validate_creator(cls, value: str) -> str:
+        return _validate_non_empty_text(value)
 
 
 class CreateProjectRequest(BaseModel):
     title: str
+    category: str = "未分类"
     origin: str
     goal: str
+    bootstrap_enabled: bool = True
     hints: list[CreateHintInline] | None = None
 
-    @field_validator("title", "origin", "goal")
+    @field_validator("title", "category", "origin", "goal")
     @classmethod
     def validate_non_empty_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
+        return _validate_non_empty_text(value)
 
 
 class CreateHintRequest(BaseModel):
     content: str
     creator: str
 
-    @field_validator("content", "creator")
+    @field_validator("content")
     @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
+    def validate_content(cls, value: str) -> str:
+        return _validate_chinese_narrative_text(value)
+
+    @field_validator("creator")
+    @classmethod
+    def validate_creator(cls, value: str) -> str:
+        return _validate_non_empty_text(value)
 
 
 class CreateIntentRequest(BaseModel):
@@ -175,15 +181,17 @@ class CreateIntentRequest(BaseModel):
 
     model_config = {"populate_by_name": True}
 
-    @field_validator("description", "creator", "worker")
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        return _validate_chinese_narrative_text(value)
+
+    @field_validator("creator", "worker")
     @classmethod
     def validate_non_empty_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
+        return _validate_non_empty_text(value)
 
     @field_validator("from_")
     @classmethod
@@ -225,15 +233,17 @@ class ReasonClaimRequest(BaseModel):
 class ConcludeRequest(BaseModel):
     worker: str
     description: str
-    report: Any | None = None
+    provenance: FactProvenance | None = None
 
-    @field_validator("worker", "description")
+    @field_validator("description")
     @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
+    def validate_description(cls, value: str) -> str:
+        return _validate_chinese_narrative_text(value)
+
+    @field_validator("worker")
+    @classmethod
+    def validate_worker(cls, value: str) -> str:
+        return _validate_non_empty_text(value)
 
 
 class CompleteRequest(BaseModel):
@@ -243,13 +253,15 @@ class CompleteRequest(BaseModel):
 
     model_config = {"populate_by_name": True}
 
-    @field_validator("description", "worker")
+    @field_validator("description")
     @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
+    def validate_description(cls, value: str) -> str:
+        return _validate_chinese_narrative_text(value)
+
+    @field_validator("worker")
+    @classmethod
+    def validate_worker(cls, value: str) -> str:
+        return _validate_non_empty_text(value)
 
     @field_validator("from_")
     @classmethod
@@ -266,6 +278,42 @@ class CompleteRequest(BaseModel):
 class ConcludeResponse(BaseModel):
     fact: Fact
     intent: Intent
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+    @field_validator("username", "password")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        return _validate_non_empty_text(value)
+
+
+class SessionResponse(BaseModel):
+    enabled: bool
+    authenticated: bool
+    username: str | None = None
+
+
+class CreateTimelinePromptRequest(BaseModel):
+    timeline_entry_id: str
+    prompt_text: str
+    phase: str
+    worker: str
+    intent_id: str | None = None
+
+    @field_validator("timeline_entry_id", "prompt_text", "phase", "worker")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        return _validate_non_empty_text(value)
+
+    @field_validator("intent_id")
+    @classmethod
+    def validate_optional_intent_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_non_empty_text(value)
 
 
 class UpdateProjectStatusRequest(BaseModel):
@@ -288,16 +336,51 @@ class ReopenRequest(BaseModel):
     description: str
     creator: str
 
-    @field_validator("description", "creator")
+    @field_validator("description")
     @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
+    def validate_description(cls, value: str) -> str:
+        return _validate_chinese_narrative_text(value)
+
+    @field_validator("creator")
+    @classmethod
+    def validate_creator(cls, value: str) -> str:
+        return _validate_non_empty_text(value)
 
 
 class ReopenResponse(BaseModel):
     project: ProjectMeta
     fact: Fact
     intent: Intent
+
+
+class TrafficRecordSummary(BaseModel):
+    id: str
+    timestamp: str
+    scheme: str
+    host: str
+    port: int
+    method: str
+    path: str
+    url: str
+    status_code: int | None = None
+    matched_field: str | None = None
+    matched_excerpt: str | None = None
+
+
+class TrafficRecordDetail(TrafficRecordSummary):
+    request_headers: dict[str, str] = Field(default_factory=dict)
+    response_headers: dict[str, str] = Field(default_factory=dict)
+    raw_request: str
+    raw_response: str | None = None
+    pcap_file: str | None = None
+    source_file: str | None = None
+
+
+class ProjectFileEntry(BaseModel):
+    path: str
+    name: str
+    kind: Literal["file", "directory"]
+    size: int | None = None
+
+
+ProjectDetail.model_rebuild()

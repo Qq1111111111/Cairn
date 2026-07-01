@@ -6,22 +6,28 @@ services:
     image: cairn-app
     container_name: cairn-server
     ports:
-      - "38080:38080"
+      - "8000:8000"
     volumes:
       - ./datas/cairn/:/root/.local/share/cairn/
-      - ./dispatch.yaml:/cairn/dispatch.yaml:ro
+      - ./worker-project-files:/cairn/worker-project-files
+    environment:
+      CAIRN_PROJECT_FILES_DIR: /cairn/worker-project-files
+      CAIRN_AUTH_USERNAME: ${CAIRN_AUTH_USERNAME:-admin}
+      CAIRN_AUTH_PASSWORD: ${CAIRN_AUTH_PASSWORD:-ChangeMe!123456}
+      CAIRN_SESSION_SECRET: ${CAIRN_SESSION_SECRET:-please-change-this-session-secret}
+      CAIRN_INTERNAL_TOKEN: ${CAIRN_INTERNAL_TOKEN:-please-change-this-internal-token}
     healthcheck:
       test:
         - "CMD"
         - "python"
         - "-c"
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38080/healthz', timeout=5)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/auth/session', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 3s
     restart: unless-stopped
-    command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--port", "38080", "--no-access-log"]
+    command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
   cairn-dispatcher:
     build:
       context: .
@@ -31,6 +37,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./dispatch.yaml:/cairn/dispatch.yaml
+      - ./worker-project-files:/cairn/worker-project-files
+    environment:
+      CAIRN_INTERNAL_TOKEN: ${CAIRN_INTERNAL_TOKEN:-please-change-this-internal-token}
     depends_on:
       cairn-server:
         condition: service_healthy

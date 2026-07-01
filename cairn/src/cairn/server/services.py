@@ -3,16 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any
 
 from fastapi import HTTPException
 
-from cairn.reporting import (
-    build_code_evidence_excerpt,
-    build_fallback_report_from_conclusion,
-    finding_prefers_code_evidence,
-)
-from cairn.server.models import Intent, ProjectMeta, ProjectReason, Report
+from cairn.server.models import Fact, FactProvenance, Intent, ProjectMeta, ProjectReason, TimelinePrompt
 
 
 def utcnow() -> str:
@@ -54,10 +48,6 @@ def next_intent_id(conn: sqlite3.Connection, project_id: str) -> str:
 
 def next_hint_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "hint", "h", project_id)
-
-
-def next_report_id(conn: sqlite3.Connection, project_id: str) -> str:
-    return _next_scoped_id(conn, "report", "r", project_id)
 
 
 def get_project_or_404(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
@@ -185,555 +175,34 @@ def build_intents(conn: sqlite3.Connection, project_id: str) -> list[Intent]:
     return [intent_to_model(conn, r, project_id) for r in rows]
 
 
-def _report_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        try:
-            text = json.dumps(value, ensure_ascii=False)
-        except TypeError:
-            text = str(value)
-    else:
-        text = str(value)
-    text = text.strip()
-    return text or None
-
-
-def _report_title_from_summary(summary: str, fallback: str = "未命名发现") -> str:
-    text = " ".join(summary.split())
-    if not text:
-        return fallback
-    cut = len(text)
-    for sep in ("。", ".", "；", ";", "\n"):
-        pos = text.find(sep)
-        if pos > 0:
-            cut = min(cut, pos)
-    text = text[:cut].strip() or text
-    chars = list(text)
-    if len(chars) <= 36:
-        return text
-    return "".join(chars[:36]) + "..."
-
-
-def _report_source_label(
-    intent_id: str, fact_id: str, source_fact_ids: list[str]
-) -> str:
-    if source_fact_ids:
-        source = " · ".join(source_fact_ids)
-    else:
-        source = "—"
-    return f"来自结论 {intent_id} → {fact_id}，来源事实：{source}"
-
-
-def _source_context_from_facts(
-    fact_descriptions: dict[str, str],
-    source_fact_ids: list[str],
-) -> list[str]:
-    context: list[str] = []
-    for source_id in source_fact_ids:
-        description = fact_descriptions.get(source_id, "").strip()
-        if description:
-            context.append(description)
-    return context
-
-
-def _source_context_from_request_packet(raw_request: str | None) -> list[str]:
-    if not raw_request:
-        return []
-    try:
-        parsed = json.loads(raw_request)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(parsed, dict):
-        return []
-    source_facts = parsed.get("source_facts")
-    if not isinstance(source_facts, list):
-        return []
-    context: list[str] = []
-    for source in source_facts:
-        if not isinstance(source, dict):
-            continue
-        description = _report_text(source.get("description"))
-        if description:
-            context.append(description)
-    return context
-
-
-def _normalize_report_evidence(raw: Any) -> list[dict[str, Any]]:
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        text = raw.strip()
-        return [{"kind": "code", "label": "证据", "content": text}] if text else []
-    items = raw if isinstance(raw, list) else [raw]
-    normalized: list[dict[str, Any]] = []
-    for item in items:
-        if isinstance(item, str):
-            text = item.strip()
-            if text:
-                normalized.append({"kind": "code", "label": "证据", "content": text})
-            continue
-        if not isinstance(item, dict):
-            continue
-        kind = _report_text(item.get("kind") or item.get("type"))
-        label = _report_text(item.get("label") or item.get("title"))
-        content = _report_text(
-            item.get("content")
-            or item.get("text")
-            or item.get("code")
-            or item.get("snippet")
-        )
-        request_packet = _report_text(
-            item.get("request_packet")
-            or item.get("request")
-            or item.get("request_data")
-            or item.get("request_body")
-        )
-        response_packet = _report_text(
-            item.get("response_packet")
-            or item.get("response")
-            or item.get("response_data")
-            or item.get("response_body")
-        )
-        if not kind:
-            if request_packet or response_packet:
-                kind = "packet"
-            elif content is not None:
-                kind = "code"
-        evidence_item: dict[str, Any] = {}
-        if kind:
-            evidence_item["kind"] = kind
-        if label:
-            evidence_item["label"] = label
-        if content is not None:
-            evidence_item["content"] = content
-        if request_packet is not None:
-            evidence_item["request_packet"] = request_packet
-        if response_packet is not None:
-            evidence_item["response_packet"] = response_packet
-        if evidence_item:
-            normalized.append(evidence_item)
-    return normalized
-
-
-def _has_packet_evidence(evidence: list[dict[str, Any]]) -> bool:
-    return any(item.get("request_packet") or item.get("response_packet") for item in evidence)
-
-
-def _compact_report_text(value: str | None) -> str:
-    return " ".join((value or "").split()).strip()
-
-
-def _evidence_looks_like_conclusion(
-    evidence: list[dict[str, Any]],
-    finding_text: str | None,
-) -> bool:
-    if not evidence:
-        return True
-    if len(evidence) != 1:
-        return False
-    item = evidence[0]
-    if item.get("request_packet") or item.get("response_packet"):
-        return False
-    label = _compact_report_text(_report_text(item.get("label"))).lower()
-    content = _compact_report_text(_report_text(item.get("content")))
-    finding = _compact_report_text(finding_text)
-    if label in {"结论原文", "结论", "发现原文", "原文摘录"}:
-        return True
-    if content and finding:
-        return content == finding or content in finding or finding in content
-    return False
-
-
-def _enrich_report_evidence(
-    finding: dict[str, Any],
-    source_context: list[str] | None,
-) -> list[dict[str, Any]]:
-    evidence = finding.get("evidence")
-    normalized = evidence if isinstance(evidence, list) else []
-    if _has_packet_evidence(normalized):
-        return normalized
-    if not finding_prefers_code_evidence(
-        title=_report_text(finding.get("title")),
-        finding_type=_report_text(finding.get("type")),
-        finding_text=_report_text(finding.get("finding")),
-    ):
-        return normalized
-    if normalized and not _evidence_looks_like_conclusion(
-        normalized,
-        _report_text(finding.get("finding")),
-    ):
-        return normalized
-
-    excerpt = build_code_evidence_excerpt(
-        finding_text=_report_text(finding.get("finding")) or "",
-        asset=_report_text(finding.get("asset")),
-        endpoint=_report_text(finding.get("endpoint")),
-        source_context=source_context,
-    )
-    if not excerpt:
-        return normalized
-    return [{"kind": "code", "label": "源码上下文", "content": excerpt}]
-
-
-def _normalize_report_findings(
-    raw: Any,
-    fallback_source: str,
-    source_context: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    if isinstance(raw, dict):
-        candidates = [raw]
-    elif isinstance(raw, list):
-        candidates = raw
-    else:
-        candidates = []
-
-    findings: list[dict[str, Any]] = []
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            text = _report_text(candidate)
-            if not text:
-                continue
-            candidate = {"title": _report_title_from_summary(text), "finding": text}
-
-        finding_text = _report_text(
-            candidate.get("finding")
-            or candidate.get("description")
-            or candidate.get("summary")
-        )
-        title = _report_text(candidate.get("title") or candidate.get("name"))
-        if not title:
-            title = _report_title_from_summary(finding_text or "", "未命名发现")
-
-        evidence = _normalize_report_evidence(candidate.get("evidence"))
-        direct_evidence = _normalize_report_evidence(
-            {
-                "request_packet": candidate.get("request_packet")
-                or candidate.get("request"),
-                "response_packet": candidate.get("response_packet")
-                or candidate.get("response"),
-            }
-        )
-        evidence.extend(direct_evidence)
-
-        finding = {
-            "title": title,
-            "asset": _report_text(candidate.get("asset") or candidate.get("target")),
-            "endpoint": _report_text(
-                candidate.get("endpoint")
-                or candidate.get("uri")
-                or candidate.get("path")
-            ),
-            "source": _report_text(candidate.get("source")) or fallback_source,
-            "type": _report_text(
-                candidate.get("type") or candidate.get("category") or candidate.get("kind")
-            ),
-            "status": _report_text(candidate.get("status")) or "已确认",
-            "severity": _report_text(
-                candidate.get("severity") or candidate.get("risk")
-            )
-            or "待定",
-            "finding": finding_text or title,
-            "fix": _report_text(
-                candidate.get("fix")
-                or candidate.get("remediation")
-                or candidate.get("recommendation")
-            ),
-            "evidence": evidence,
-        }
-        finding["evidence"] = _enrich_report_evidence(finding, source_context)
-        findings.append(finding)
-    return findings
-
-
-def normalize_report_payload(
-    raw: Any,
-    *,
-    fallback_summary: str,
-    fallback_source: str,
-    source_context: list[str] | None = None,
-) -> dict[str, Any]:
-    report = raw
-    summary = fallback_summary
-    title = "漏洞报告"
-    findings: list[dict[str, Any]] = []
-
-    if isinstance(raw, dict):
-        nested = raw.get("report")
-        if isinstance(nested, dict) and (
-            "findings" in nested
-            or "vulnerabilities" in nested
-            or "items" in nested
-            or "title" in nested
-        ):
-            report = nested
-
-    if isinstance(report, dict):
-        title = _report_text(report.get("title") or report.get("name")) or title
-        summary = _report_text(
-            report.get("summary")
-            or report.get("description")
-            or report.get("finding")
-        ) or summary
-        findings = _normalize_report_findings(
-            report.get("findings")
-            or report.get("vulnerabilities")
-            or report.get("items"),
-            fallback_source,
-            source_context,
-        )
-        if not findings and any(
-            key in report
-            for key in (
-                "finding",
-                "description",
-                "asset",
-                "endpoint",
-                "request_packet",
-                "response_packet",
-            )
-        ):
-            findings = _normalize_report_findings(
-                report,
-                fallback_source,
-                source_context,
-            )
-    elif isinstance(report, list):
-        findings = _normalize_report_findings(report, fallback_source, source_context)
-    else:
-        summary = _report_text(report) or summary
-
-    if not findings:
-        finding_summary = summary or fallback_summary
-        finding = {
-            "title": _report_title_from_summary(finding_summary),
-            "asset": None,
-            "endpoint": None,
-            "source": fallback_source,
-            "type": None,
-            "status": "已确认",
-            "severity": "待定",
-            "finding": finding_summary,
-            "fix": None,
-            "evidence": [],
-        }
-        finding["evidence"] = _enrich_report_evidence(finding, source_context)
-        findings = [finding]
-
-    return {
-        "type": "conclude_report",
-        "title": title,
-        "summary": summary,
-        "findings": findings,
-    }
-
-
-def _report_summary_from_packet(raw: Any, fallback: str) -> str:
-    if isinstance(raw, dict):
-        fact = raw.get("fact")
-        if isinstance(fact, dict):
-            desc = _report_text(fact.get("description"))
-            if desc:
-                return desc
-        conclusion = raw.get("conclusion")
-        if isinstance(conclusion, dict):
-            conclusion_fact = conclusion.get("fact")
-            if isinstance(conclusion_fact, dict):
-                desc = _report_text(conclusion_fact.get("description"))
-                if desc:
-                    return desc
-        desc = _report_text(raw.get("description") or raw.get("summary"))
-        if desc:
-            return desc
-    return fallback
-
-
-def build_conclude_report_packets(
-    *,
-    report_id: str,
-    project_row: sqlite3.Row,
-    intent_row: sqlite3.Row,
-    source_fact_ids: list[str],
-    fact_descriptions: dict[str, str],
-    fact_id: str,
-    worker: str,
-    conclusion_description: str,
-    raw_report: Any,
-    created_at: str,
-) -> tuple[str, str]:
-    request_payload: dict[str, Any] = {
-        "type": "conclude_report_request",
-        "project": {
-            "id": project_row["id"],
-            "title": project_row["title"],
-            "status": project_row["status"],
-        },
-        "intent": {
-            "id": intent_row["id"],
-            "from": source_fact_ids,
-            "description": intent_row["description"],
-            "creator": intent_row["creator"],
-            "worker": worker,
-            "created_at": intent_row["created_at"],
-            "concluded_at": intent_row["concluded_at"],
-        },
-        "source_facts": [
-            {"id": source_id, "description": fact_descriptions.get(source_id, "")}
-            for source_id in source_fact_ids
-        ],
-        "conclusion": {
-            "fact": {"id": fact_id, "description": conclusion_description}
-        },
-        "report": raw_report,
-    }
-    fallback_source = _report_source_label(
-        intent_row["id"], fact_id, source_fact_ids
-    )
-    source_context = _source_context_from_facts(fact_descriptions, source_fact_ids)
-    response_payload = normalize_report_payload(
-        raw_report,
-        fallback_summary=conclusion_description,
-        fallback_source=fallback_source,
-        source_context=source_context,
-    )
-    response_payload["report_id"] = report_id
-    response_payload["project_id"] = project_row["id"]
-    response_payload["intent_id"] = intent_row["id"]
-    response_payload["fact_id"] = fact_id
-    response_payload["worker"] = worker
-    response_payload["created_at"] = created_at
-
-    return (
-        json.dumps(request_payload, ensure_ascii=False, indent=2),
-        json.dumps(response_payload, ensure_ascii=False, indent=2),
-    )
-
-
-def report_to_model(row: sqlite3.Row) -> Report:
-    source_fact_ids: list[str] = []
-    raw_source_fact_ids = row["source_fact_ids"]
-    if raw_source_fact_ids:
-        try:
-            parsed = json.loads(raw_source_fact_ids)
-        except json.JSONDecodeError:
-            parsed = []
-        if isinstance(parsed, list):
-            source_fact_ids = [str(item) for item in parsed if str(item).strip()]
-    raw_response = row["response_packet"]
-    parsed_response: Any = None
-    try:
-        parsed_response = json.loads(raw_response) if raw_response else None
-    except json.JSONDecodeError:
-        parsed_response = None
-    fallback_summary = _report_summary_from_packet(
-        parsed_response, raw_response or "结论报告"
-    )
-    source_context = _source_context_from_request_packet(row["request_packet"])
-    payload = normalize_report_payload(
-        parsed_response,
-        fallback_summary=fallback_summary,
-        fallback_source=_report_source_label(
-            row["intent_id"], row["fact_id"], source_fact_ids
-        ),
-        source_context=source_context,
-    )
-    return Report(
-        id=row["id"],
-        project_id=row["project_id"],
-        intent_id=row["intent_id"],
-        fact_id=row["fact_id"],
-        worker=row["worker"],
-        source_fact_ids=source_fact_ids,
-        request_packet=row["request_packet"],
-        response_packet=row["response_packet"],
-        created_at=row["created_at"],
-        title=payload.get("title") or "漏洞报告",
-        summary=payload.get("summary"),
-        findings=payload.get("findings") or [],
-    )
-
-
-def build_reports(conn: sqlite3.Connection, project_id: str) -> list[Report]:
+def build_facts(conn: sqlite3.Connection, project_id: str) -> list[Fact]:
     rows = conn.execute(
-        "SELECT * FROM reports WHERE project_id = ? ORDER BY created_at, id",
-        (project_id,),
-    ).fetchall()
-    reports = [report_to_model(r) for r in rows]
-    reported_intents = {report.intent_id for report in reports}
-
-    project_row = get_project_or_404(conn, project_id)
-    fact_rows = conn.execute(
-        "SELECT id, description FROM facts WHERE project_id = ?",
-        (project_id,),
-    ).fetchall()
-    fact_descriptions = {row["id"]: row["description"] for row in fact_rows}
-    intent_rows = conn.execute(
         """
-        SELECT *
-        FROM intents
-        WHERE project_id = ?
-          AND to_fact_id IS NOT NULL
-        ORDER BY concluded_at, id
+        SELECT f.id, f.description,
+               p.scheme, p.host, p.port, p.method, p.path, p.url, p.interface_label, p.repro_command,
+               p.evidence_files_json, p.traffic_ids_json
+        FROM facts f
+        LEFT JOIN fact_provenance p
+          ON p.project_id = f.project_id AND p.fact_id = f.id
+        WHERE f.project_id = ?
+        ORDER BY f.rowid
         """,
         (project_id,),
     ).fetchall()
-    for intent_row in intent_rows:
-        if intent_row["id"] in reported_intents:
-            continue
-        fact_id = intent_row["to_fact_id"]
-        if not fact_id:
-            continue
-        conclusion_description = fact_descriptions.get(fact_id, "")
-        source_rows = conn.execute(
-            "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
-            (intent_row["id"], project_id),
-        ).fetchall()
-        source_fact_ids = [row["fact_id"] for row in source_rows]
-        source_context = _source_context_from_facts(fact_descriptions, source_fact_ids)
-        raw_report = build_fallback_report_from_conclusion(
-            conclusion_description,
-            source_context=source_context,
-        )
-        if raw_report is None:
-            continue
-        request_packet, response_packet = build_conclude_report_packets(
-            report_id=f"auto_{intent_row['id']}",
-            project_row=project_row,
-            intent_row=intent_row,
-            source_fact_ids=source_fact_ids,
-            fact_descriptions=fact_descriptions,
-            fact_id=fact_id,
-            worker=intent_row["worker"] or "system",
-            conclusion_description=conclusion_description,
-            raw_report=raw_report,
-            created_at=intent_row["concluded_at"] or utcnow(),
-        )
-        payload = normalize_report_payload(
-            json.loads(response_packet),
-            fallback_summary=conclusion_description,
-            fallback_source=_report_source_label(
-                intent_row["id"], fact_id, source_fact_ids
-            ),
-            source_context=source_context,
-        )
-        reports.append(
-            Report(
-                id=f"auto_{intent_row['id']}",
-                project_id=project_id,
-                intent_id=intent_row["id"],
-                fact_id=fact_id,
-                worker=intent_row["worker"] or "system",
-                source_fact_ids=source_fact_ids,
-                request_packet=request_packet,
-                response_packet=response_packet,
-                created_at=intent_row["concluded_at"] or utcnow(),
-                title=payload.get("title") or "漏洞报告",
-                summary=payload.get("summary"),
-                findings=payload.get("findings") or [],
-            )
-        )
+    return [fact_from_row(row) for row in rows]
 
-    return sorted(reports, key=lambda report: (report.created_at, report.id))
+
+def build_timeline_prompts(conn: sqlite3.Connection, project_id: str) -> list[TimelinePrompt]:
+    rows = conn.execute(
+        """
+        SELECT timeline_entry_id, intent_id, phase, worker, prompt_text, created_at
+        FROM timeline_prompts
+        WHERE project_id = ?
+        ORDER BY created_at, timeline_entry_id
+        """,
+        (project_id,),
+    ).fetchall()
+    return [TimelinePrompt(**dict(row)) for row in rows]
 
 
 def get_intent_timeout(conn: sqlite3.Connection) -> int:
@@ -761,10 +230,33 @@ def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
     return ProjectMeta(
         id=row["id"],
         title=row["title"],
+        category=row["category"],
         status=row["status"],
+        bootstrap_enabled=bool(row["bootstrap_enabled"]),
         created_at=row["created_at"],
         reason=project_reason_from_row(row),
     )
+
+
+def fact_from_row(row: sqlite3.Row) -> Fact:
+    provenance = None
+    if any(
+        row[key] is not None
+        for key in ("scheme", "host", "port", "method", "path", "url", "interface_label", "repro_command")
+    ) or row["evidence_files_json"] not in (None, "[]") or row["traffic_ids_json"] not in (None, "[]"):
+        provenance = FactProvenance(
+            scheme=row["scheme"],
+            host=row["host"],
+            port=row["port"],
+            method=row["method"],
+            path=row["path"],
+            url=row["url"],
+            interface_label=row["interface_label"],
+            repro_command=row["repro_command"],
+            evidence_files=json.loads(row["evidence_files_json"] or "[]"),
+            traffic_ids=json.loads(row["traffic_ids_json"] or "[]"),
+        )
+    return Fact(id=row["id"], description=row["description"], provenance=provenance)
 
 
 def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:

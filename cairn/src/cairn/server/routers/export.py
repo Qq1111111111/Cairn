@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from datetime import datetime
+import json
 import yaml
 
 from cairn.server.db import get_conn
@@ -25,7 +26,17 @@ def _load_project_data(conn, project_id: str):
     proj = get_project_or_404(conn, project_id)
 
     facts = conn.execute(
-        "SELECT id, description FROM facts WHERE project_id = ?", (project_id,)
+        """
+        SELECT f.id, f.description,
+               p.scheme, p.host, p.port, p.method, p.path, p.url, p.interface_label, p.repro_command,
+               p.evidence_files_json, p.traffic_ids_json
+        FROM facts f
+        LEFT JOIN fact_provenance p
+          ON p.project_id = f.project_id AND p.fact_id = f.id
+        WHERE f.project_id = ?
+        ORDER BY f.rowid
+        """,
+        (project_id,),
     ).fetchall()
     hints = conn.execute(
         "SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at",
@@ -61,8 +72,10 @@ def _export_yaml(conn, project_id: str) -> str:
     data: dict = {
         "project": {
             "title": proj["title"],
+            "category": proj["category"],
             "origin": origin_desc,
             "goal": goal_desc,
+            "bootstrap_enabled": bool(proj["bootstrap_enabled"]),
         }
     }
 
@@ -76,7 +89,25 @@ def _export_yaml(conn, project_id: str) -> str:
             for h in hints
         ]
 
-    data["facts"] = [{"id": f["id"], "description": f["description"]} for f in facts]
+    fact_entries = []
+    for f in facts:
+        entry = {"id": f["id"], "description": f["description"]}
+        provenance = {
+            "scheme": f["scheme"],
+            "host": f["host"],
+            "port": f["port"],
+            "method": f["method"],
+            "path": f["path"],
+            "url": f["url"],
+            "interface_label": f["interface_label"],
+            "repro_command": f["repro_command"],
+            "evidence_files": json.loads(f["evidence_files_json"] or "[]"),
+            "traffic_ids": json.loads(f["traffic_ids_json"] or "[]"),
+        }
+        if any(value not in (None, "", []) for value in provenance.values()):
+            entry["provenance"] = provenance
+        fact_entries.append(entry)
+    data["facts"] = fact_entries
 
     intent_list = []
     for i in intents:
@@ -108,13 +139,13 @@ def _export_timeline(conn, project_id: str) -> str:
     origin_desc = facts_by_id.get("origin", "")
     goal_desc = facts_by_id.get("goal", "")
     ts = format_export_timestamp(proj["created_at"]) or ""
-    block = f"[{ts}] PROJECT CREATED\n  origin: {origin_desc}\n  goal: {goal_desc}"
+    block = f"[{ts}] 项目创建\n  起点：{origin_desc}\n  目标：{goal_desc}"
     events.append((proj["created_at"] or "", order, block))
     order += 1
 
     for h in hints:
         ts = format_export_timestamp(h["created_at"]) or ""
-        block = f"[{ts}] HINT by {h['creator']}\n  {h['content']}"
+        block = f"[{ts}] 提示 by {h['creator']}\n  {h['content']}"
         events.append((h["created_at"] or "", order, block))
         order += 1
 
@@ -123,10 +154,10 @@ def _export_timeline(conn, project_id: str) -> str:
         from_str = ", ".join(src)
 
         ts = format_export_timestamp(i["created_at"]) or ""
-        meta = f"  from: {from_str}"
+        meta = f"  来源：{from_str}"
         if i["worker"] and not i["concluded_at"]:
-            meta += f"\n  worker: {i['worker']} (in progress)"
-        block = f"[{ts}] INTENT DECLARED {i['id']} by {i['creator']}\n{meta}\n  {i['description']}"
+            meta += f"\n  执行者：{i['worker']}（进行中）"
+        block = f"[{ts}] 意图声明 {i['id']} by {i['creator']}\n{meta}\n  {i['description']}"
         events.append((i["created_at"] or "", order, block))
         order += 1
 
@@ -137,10 +168,10 @@ def _export_timeline(conn, project_id: str) -> str:
         actor = i["worker"] or i["creator"]
 
         if i["to_fact_id"] == "goal":
-            block = f"[{ts}] PROJECT COMPLETED by {actor}\n  via: {i['id']} from {from_str}"
+            block = f"[{ts}] 项目完成 by {actor}\n  经由：{i['id']}，来源：{from_str}"
         else:
             fact_desc = facts_by_id.get(i["to_fact_id"], "")
-            block = f"[{ts}] INTENT CONCLUDED {i['id']} by {actor}\n  from: {from_str}\n  produced: {i['to_fact_id']}\n  {fact_desc}"
+            block = f"[{ts}] 意图完成 {i['id']} by {actor}\n  来源：{from_str}\n  产出：{i['to_fact_id']}\n  {fact_desc}"
 
         events.append((i["concluded_at"] or "", order, block))
         order += 1

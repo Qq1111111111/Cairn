@@ -2,18 +2,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from cairn import __version__
-from cairn.server.auth import (
-    extract_session_token,
-    load_web_auth_config,
-    resolve_authenticated_username,
-    sync_web_auth_user,
-)
 from cairn.server import db
-from cairn.server.routers import auth, export, hints, intents, projects, settings
+from cairn.server.auth import protected_route, request_uses_internal_token, require_authenticated_user
+from cairn.server.project_files import ensure_project_files_root
+from cairn.server.routers import auth, export, hints, intents, projects, prompts, settings, traffic
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -21,11 +18,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.configure(db.DEFAULT_DB)
-    web_auth_config = load_web_auth_config(Path("dispatch.yaml"))
-    app.state.auth_enabled = web_auth_config is not None
-    if web_auth_config is not None:
-        with db.get_conn() as conn:
-            sync_web_auth_user(conn, web_auth_config)
+    ensure_project_files_root()
     yield
 
 
@@ -36,46 +29,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
 @app.middleware("http")
-async def web_auth_middleware(request: Request, call_next):
-    if not getattr(app.state, "auth_enabled", False):
-        return await call_next(request)
-
-    path = request.url.path
-    if (
-        request.method == "OPTIONS"
-        or path == "/"
-        or path == "/healthz"
-        or path.startswith("/auth/")
-        or path.startswith("/static/")
-    ):
-        return await call_next(request)
-
-    username = None
-    with db.get_conn() as conn:
-        username = resolve_authenticated_username(
-            conn,
-            enabled=True,
-            session_token=extract_session_token(request),
-        )
-    if username is None:
-        return JSONResponse({"detail": "请先登录"}, status_code=401)
-    request.state.auth_user = username
-    return await call_next(request)
-
-
-@app.get("/healthz", include_in_schema=False)
-def healthz():
-    return {"ok": True}
-
+async def auth_and_security_middleware(request: Request, call_next):
+    if protected_route(request.url.path) and not request_uses_internal_token(request):
+        try:
+            require_authenticated_user(request)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 401:
+                return JSONResponse({"detail": "Authentication required"}, status_code=401)
+            raise
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 app.include_router(auth.router)
 app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(hints.router)
 app.include_router(intents.router)
+app.include_router(prompts.router)
 app.include_router(export.router)
+app.include_router(traffic.router)
 
 
 @app.get("/", include_in_schema=False)

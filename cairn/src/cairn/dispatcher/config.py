@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 TaskType = Literal["reason", "explore", "bootstrap"]
 WorkerType = Literal["claudecode", "codex", "pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
+WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 
 WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
     "claudecode": (
@@ -152,6 +153,11 @@ class ContainerConfig(BaseModel):
     network_mode: str
     completed_action: CompletedAction
     cap_add: list[str] = Field(default_factory=list)
+    artifact_mirror_dir: Path | None = None
+    traffic_enabled: bool = False
+    traffic_mirror_dir: Path | None = None
+    traffic_proxy_host: str = "127.0.0.1"
+    traffic_proxy_port: int = Field(default=18080, ge=1, le=65535)
 
 
 class RuntimeConfig(BaseModel):
@@ -160,6 +166,7 @@ class RuntimeConfig(BaseModel):
     max_project_workers: int = Field(gt=0)
     interval: int = Field(gt=0)
     healthcheck_timeout: int = Field(gt=0)
+    worker_healthcheck: WorkerHealthcheckMode = "startup_only"
     prompt_group: str = Field(min_length=1)
 
 
@@ -261,6 +268,24 @@ class DispatchConfig(BaseModel):
     def load(cls, path: Path) -> "DispatchConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
+        mirror_dir = config.container.artifact_mirror_dir
+        traffic_dir = config.container.traffic_mirror_dir
+        if mirror_dir is not None and not mirror_dir.is_absolute():
+            config = config.model_copy(
+                update={
+                    "container": config.container.model_copy(
+                        update={"artifact_mirror_dir": (path.parent / mirror_dir).resolve()}
+                    )
+                }
+            )
+        if traffic_dir is not None and not traffic_dir.is_absolute():
+            config = config.model_copy(
+                update={
+                    "container": config.container.model_copy(
+                        update={"traffic_mirror_dir": (path.parent / traffic_dir).resolve()}
+                    )
+                }
+            )
         validate_prompt_resources(config.runtime.prompt_group)
         return config
 

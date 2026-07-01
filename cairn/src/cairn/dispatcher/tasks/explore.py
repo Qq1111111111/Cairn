@@ -16,8 +16,11 @@ from cairn.dispatcher.tasks.common import (
     did_timeout,
     project_allows_conclude_fallback,
     preview,
+    record_timeline_prompt,
     run_healthcheck,
     run_worker_process,
+    sync_project_traffic,
+    task_healthcheck_enabled,
     write_conclude_result,
     write_graph_snapshot_reference,
 )
@@ -44,55 +47,57 @@ def run_explore_task(
     lease.start()
     try:
         container_name = container_manager.ensure_running(project.project.id)
+        container_manager.ensure_project_traffic_capture(project.project.id, container_name)
 
-        LOG.info(
-            "starting container exec project=%s intent=%s worker=%s phase=explore_healthcheck timeout=%ss",
-            project.project.id,
-            intent.id,
-            worker.name,
-            healthcheck_timeout,
-        )
-        healthcheck = run_healthcheck(
-            container_manager,
-            container_name,
-            worker,
-            driver.build_healthcheck(worker),
-            timeout_seconds=healthcheck_timeout,
-            lease=lease,
-            cancellation=cancellation,
-        )
-        cancelled = cancel_reason(healthcheck.result, cancellation)
-        if cancelled is not None:
+        if task_healthcheck_enabled(config):
             LOG.info(
-                "explore cancelled during healthcheck project=%s intent=%s worker=%s reason=%s",
+                "starting container exec project=%s intent=%s worker=%s phase=explore_healthcheck timeout=%ss",
                 project.project.id,
                 intent.id,
                 worker.name,
-                cancelled,
+                healthcheck_timeout,
             )
-            best_effort_release(client, project.project.id, intent.id, worker.name)
-            return "cancelled"
-        if lease.failure is not None:
-            LOG.warning(
-                "heartbeat lost during explore healthcheck project=%s intent=%s worker=%s status=%s",
-                project.project.id,
-                intent.id,
-                worker.name,
-                lease.failure.status_code,
+            healthcheck = run_healthcheck(
+                container_manager,
+                container_name,
+                worker,
+                driver.build_healthcheck(worker),
+                timeout_seconds=healthcheck_timeout,
+                lease=lease,
+                cancellation=cancellation,
             )
-            best_effort_release(client, project.project.id, intent.id, worker.name)
-            return "failed"
-        if healthcheck.result.returncode != 0:
-            LOG.warning(
-                "worker unhealthy project=%s intent=%s worker=%s healthcheck_ms=%s stderr=%s",
-                project.project.id,
-                intent.id,
-                worker.name,
-                healthcheck.duration_ms,
-                preview(healthcheck.result.stderr),
-            )
-            best_effort_release(client, project.project.id, intent.id, worker.name)
-            return "unhealthy"
+            cancelled = cancel_reason(healthcheck.result, cancellation)
+            if cancelled is not None:
+                LOG.info(
+                    "explore cancelled during healthcheck project=%s intent=%s worker=%s reason=%s",
+                    project.project.id,
+                    intent.id,
+                    worker.name,
+                    cancelled,
+                )
+                best_effort_release(client, project.project.id, intent.id, worker.name)
+                return "cancelled"
+            if lease.failure is not None:
+                LOG.warning(
+                    "heartbeat lost during explore healthcheck project=%s intent=%s worker=%s status=%s",
+                    project.project.id,
+                    intent.id,
+                    worker.name,
+                    lease.failure.status_code,
+                )
+                best_effort_release(client, project.project.id, intent.id, worker.name)
+                return "failed"
+            if healthcheck.result.returncode != 0:
+                LOG.warning(
+                    "worker unhealthy project=%s intent=%s worker=%s healthcheck_ms=%s stderr=%s",
+                    project.project.id,
+                    intent.id,
+                    worker.name,
+                    healthcheck.duration_ms,
+                    preview(healthcheck.result.stderr),
+                )
+                best_effort_release(client, project.project.id, intent.id, worker.name)
+                return "unhealthy"
 
         prompt = render_prompt(
             load_prompt(config.runtime.prompt_group, "explore.md"),
@@ -106,6 +111,15 @@ def run_explore_task(
                 "intent_id": intent.id,
                 "intent_description": intent.description,
             },
+        )
+        record_timeline_prompt(
+            client,
+            project.project.id,
+            f"intent-running-{intent.id}",
+            prompt,
+            "explore_execute",
+            worker.name,
+            intent_id=intent.id,
         )
 
         session = driver.prepare_session()
@@ -151,7 +165,7 @@ def run_explore_task(
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 payload = parse_json_output(model_output)
-                kind, conclude_data = validate_explore_payload(payload)
+                kind, fact_data = validate_explore_payload(payload)
             except Exception as exc:
                 LOG.warning(
                     "explore parse failed project=%s intent=%s worker=%s error=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -190,20 +204,20 @@ def run_explore_task(
                 )
                 best_effort_release(client, project.project.id, intent.id, worker.name)
                 return "rejected"
-            assert conclude_data is not None
             return write_conclude_result(
                 client,
                 project.project.id,
                 intent.id,
                 worker.name,
-                conclude_data["description"],
-                report=conclude_data.get("report"),
-                dingtalk_enabled=config.dingtalk_enabled,
-                dingtalk_webhook=config.dingtalk_webhook,
-                dingtalk_secret=config.dingtalk_secret,
+                fact_data["fact_description"],
+                prompt_text=prompt,
                 source="explore_execute",
                 phase_ms=execute_ms,
                 total_ms=int((time.perf_counter() - task_started) * 1000),
+                provenance=fact_data.get("fact_provenance"),
+                container_manager=container_manager,
+                container_name=container_name,
+                artifact_mirror_dir=config.container.artifact_mirror_dir,
             )
         if did_timeout(first):
             LOG.warning(
@@ -248,6 +262,13 @@ def run_explore_task(
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
     finally:
+        if "container_name" in locals():
+            sync_project_traffic(
+                container_manager=container_manager,
+                container_name=container_name,
+                traffic_mirror_dir=config.container.traffic_mirror_dir or config.container.artifact_mirror_dir,
+                project_id=project.project.id,
+            )
         lease.stop()
 
 
@@ -301,6 +322,7 @@ def _try_conclude_fallback(
         return "failed"
 
     container_name = container_manager.ensure_running(project_id)
+    container_manager.ensure_project_traffic_capture(project_id, container_name)
 
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "explore_conclude.md"),
@@ -361,7 +383,7 @@ def _try_conclude_fallback(
     try:
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
-        kind, conclude_data = validate_explore_payload(payload)
+        kind, fact_data = validate_explore_payload(payload)
     except Exception as exc:
         LOG.warning(
             "conclude parse failed project=%s intent=%s worker=%s error=%s conclude_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -386,19 +408,19 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project_id, intent.id, worker.name)
         return "rejected"
-    assert conclude_data is not None
     return write_conclude_result(
         client,
         project_id,
         intent.id,
         worker.name,
-        conclude_data["description"],
-        report=conclude_data.get("report"),
-        dingtalk_enabled=config.dingtalk_enabled,
-        dingtalk_webhook=config.dingtalk_webhook,
-        dingtalk_secret=config.dingtalk_secret,
+        fact_data["fact_description"],
+        prompt_text=prompt,
         source="explore_conclude",
         phase_ms=conclude_ms,
+        provenance=fact_data.get("fact_provenance"),
+        container_manager=container_manager,
+        container_name=container_name,
+        artifact_mirror_dir=config.container.artifact_mirror_dir,
     )
 
 
