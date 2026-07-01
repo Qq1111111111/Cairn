@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -48,6 +49,10 @@ def next_intent_id(conn: sqlite3.Connection, project_id: str) -> str:
 
 def next_hint_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "hint", "h", project_id)
+
+
+def next_report_id(conn: sqlite3.Connection, project_id: str) -> str:
+    return _next_scoped_id(conn, "report", "r", project_id)
 
 
 def get_project_or_404(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
@@ -257,6 +262,67 @@ def fact_from_row(row: sqlite3.Row) -> Fact:
             traffic_ids=json.loads(row["traffic_ids_json"] or "[]"),
         )
     return Fact(id=row["id"], description=row["description"], provenance=provenance)
+
+
+def build_conclude_report_packets(
+    *,
+    report_id: str,
+    project_row: sqlite3.Row,
+    intent_row: sqlite3.Row,
+    source_fact_ids: list[str],
+    fact_descriptions: dict[str, str],
+    fact_id: str,
+    worker: str,
+    conclusion_description: str,
+    raw_report: Any,
+    created_at: str,
+) -> tuple[str, str]:
+    request_payload = {
+        "report_id": report_id,
+        "project_id": project_row["id"],
+        "intent_id": intent_row["id"],
+        "worker": worker,
+        "source_fact_ids": source_fact_ids,
+        "source_facts": [
+            {"id": source_id, "description": fact_descriptions.get(source_id, "")}
+            for source_id in source_fact_ids
+        ],
+        "conclusion": {
+            "fact_id": fact_id,
+            "description": conclusion_description,
+        },
+        "report": raw_report,
+        "created_at": created_at,
+    }
+    response_payload = {
+        "status": "stored",
+        "report_id": report_id,
+        "project": {
+            "id": project_row["id"],
+            "title": project_row["title"],
+            "category": project_row["category"],
+        },
+        "intent": {
+            "id": intent_row["id"],
+            "description": intent_row["description"],
+        },
+        "fact": {
+            "id": fact_id,
+            "description": conclusion_description,
+        },
+        "created_at": created_at,
+    }
+    request_packet = (
+        f"POST /projects/{project_row['id']}/intents/{intent_row['id']}/conclude\n"
+        "Content-Type: application/json; charset=utf-8\n\n"
+        f"{json.dumps(request_payload, ensure_ascii=False, indent=2)}"
+    )
+    response_packet = (
+        "HTTP/1.1 200 OK\n"
+        "Content-Type: application/json; charset=utf-8\n\n"
+        f"{json.dumps(response_payload, ensure_ascii=False, indent=2)}"
+    )
+    return request_packet, response_packet
 
 
 def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:
