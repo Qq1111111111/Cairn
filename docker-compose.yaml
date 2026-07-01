@@ -27,7 +27,7 @@ services:
       retries: 12
       start_period: 3s
     restart: unless-stopped
-    command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
+    command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
   cairn-dispatcher:
     build:
       context: .
