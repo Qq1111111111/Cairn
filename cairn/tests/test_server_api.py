@@ -22,11 +22,12 @@ def _create_project(client: TestClient) -> str:
             "title": "test",
             "origin": "starting point",
             "goal": "finish",
-            "hints": [{"content": "initial clue", "creator": "human"}],
+            "hints": [{"content": "初始线索", "creator": "human"}],
         },
     )
     assert response.status_code == 201
     assert response.json()["project"]["bootstrap_enabled"] is True
+    assert response.json()["timeline_prompts"] == []
     return response.json()["project"]["id"]
 
 
@@ -35,7 +36,7 @@ def test_project_workflow_create_conclude_complete_and_reopen(client: TestClient
 
     response = client.post(
         f"/projects/{project_id}/intents",
-        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+        json={"from": ["origin"], "description": "继续调查服务行为", "creator": "reasoner", "worker": None},
     )
     assert response.status_code == 201
     assert response.json()["id"] == "i001"
@@ -49,26 +50,26 @@ def test_project_workflow_create_conclude_complete_and_reopen(client: TestClient
 
     response = client.post(
         f"/projects/{project_id}/intents/i001/conclude",
-        json={"worker": "explorer", "description": "new fact"},
+        json={"worker": "explorer", "description": "发现新的关键事实"},
     )
     assert response.status_code == 200
-    assert response.json()["fact"] == {"id": "f001", "description": "new fact"}
+    assert response.json()["fact"] == {"id": "f001", "description": "发现新的关键事实"}
 
     response = client.post(
         f"/projects/{project_id}/complete",
-        json={"from": ["f001"], "description": "solved", "worker": "reasoner"},
+        json={"from": ["f001"], "description": "目标已满足", "worker": "reasoner"},
     )
     assert response.status_code == 200
     assert response.json()["to"] == "goal"
 
     response = client.post(
         f"/projects/{project_id}/reopen",
-        json={"description": "human correction", "creator": "human"},
+        json={"description": "人工修正结论", "creator": "human"},
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["project"]["status"] == "active"
-    assert payload["fact"] == {"id": "f002", "description": "human correction"}
+    assert payload["fact"] == {"id": "f002", "description": "人工修正结论"}
     assert payload["intent"]["from"] == ["f001"]
     assert payload["intent"]["to"] == "f002"
 
@@ -77,7 +78,7 @@ def test_stopping_project_releases_claims_and_reason_but_keeps_hints_writable(cl
     project_id = _create_project(client)
     client.post(
         f"/projects/{project_id}/intents",
-        json={"from": ["origin"], "description": "work", "creator": "worker-a", "worker": "worker-a"},
+        json={"from": ["origin"], "description": "执行进一步分析", "creator": "worker-a", "worker": "worker-a"},
     )
     client.post(
         f"/projects/{project_id}/reason/claim",
@@ -92,11 +93,11 @@ def test_stopping_project_releases_claims_and_reason_but_keeps_hints_writable(cl
     assert detail["intents"][0]["worker"] is None
     assert client.post(
         f"/projects/{project_id}/hints",
-        json={"content": "manual note", "creator": "human"},
+        json={"content": "人工补充说明", "creator": "human"},
     ).status_code == 201
     assert client.post(
         f"/projects/{project_id}/intents",
-        json={"from": ["origin"], "description": "blocked", "creator": "reasoner", "worker": None},
+        json={"from": ["origin"], "description": "继续排查阻塞点", "creator": "reasoner", "worker": None},
     ).status_code == 403
 
 
@@ -105,11 +106,11 @@ def test_intent_creation_rejects_goal_source_and_mismatched_initial_worker(clien
 
     assert client.post(
         f"/projects/{project_id}/intents",
-        json={"from": ["goal"], "description": "invalid", "creator": "reasoner", "worker": None},
+        json={"from": ["goal"], "description": "无效测试意图", "creator": "reasoner", "worker": None},
     ).status_code == 400
     assert client.post(
         f"/projects/{project_id}/intents",
-        json={"from": ["origin"], "description": "invalid", "creator": "reasoner", "worker": "explorer"},
+        json={"from": ["origin"], "description": "无效测试意图", "creator": "reasoner", "worker": "explorer"},
     ).status_code == 400
 
 
@@ -127,11 +128,46 @@ def test_settings_and_export_are_backed_by_the_same_database(client: TestClient)
     assert client.get(f"/projects/{project_id}/export?format=invalid").status_code == 400
 
 
+def test_timeline_prompt_is_persisted_and_returned_with_project_detail(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    intent = client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "继续调查服务行为", "creator": "reasoner", "worker": None},
+    ).json()
+
+    response = client.post(
+        f"/projects/{project_id}/timeline-prompts",
+        json={
+            "timeline_entry_id": f"intent-declared-{intent['id']}",
+            "intent_id": intent["id"],
+            "phase": "reason_execute",
+            "worker": "reasoner",
+            "prompt_text": "请阅读图谱并提出后续意图。",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["timeline_entry_id"] == f"intent-declared-{intent['id']}"
+
+    detail = client.get(f"/projects/{project_id}").json()
+    assert detail["timeline_prompts"] == [
+        {
+            "timeline_entry_id": f"intent-declared-{intent['id']}",
+            "intent_id": intent["id"],
+            "phase": "reason_execute",
+            "worker": "reasoner",
+            "prompt_text": "请阅读图谱并提出后续意图。",
+            "created_at": response.json()["created_at"],
+        }
+    ]
+
+
 def test_expired_intent_and_reason_leases_can_be_reclaimed(client: TestClient) -> None:
     project_id = _create_project(client)
     client.post(
         f"/projects/{project_id}/intents",
-        json={"from": ["origin"], "description": "work", "creator": "worker-a", "worker": "worker-a"},
+        json={"from": ["origin"], "description": "执行进一步分析", "creator": "worker-a", "worker": "worker-a"},
     )
     client.post(
         f"/projects/{project_id}/reason/claim",
@@ -207,3 +243,20 @@ def test_project_creation_rejects_invalid_bootstrap_enabled(client: TestClient) 
     )
 
     assert response.status_code == 422
+
+
+def test_chinese_narrative_fields_reject_english_only_content(client: TestClient) -> None:
+    project_id = _create_project(client)
+
+    assert client.post(
+        f"/projects/{project_id}/hints",
+        json={"content": "english only", "creator": "human"},
+    ).status_code == 422
+    assert client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate service", "creator": "reasoner", "worker": None},
+    ).status_code == 422
+    assert client.post(
+        f"/projects/{project_id}/intents/i999/conclude",
+        json={"worker": "explorer", "description": "new fact only"},
+    ).status_code == 422

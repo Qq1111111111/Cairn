@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter
 
 from cairn.server.db import get_conn
@@ -131,6 +133,29 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
             (fid, project_id, body.description),
         )
+        if body.provenance is not None:
+            conn.execute(
+                """
+                INSERT INTO fact_provenance (
+                    project_id, fact_id, scheme, host, port, method, path, url, interface_label,
+                    repro_command, evidence_files_json, traffic_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    fid,
+                    body.provenance.scheme,
+                    body.provenance.host,
+                    body.provenance.port,
+                    body.provenance.method,
+                    body.provenance.path,
+                    body.provenance.url,
+                    body.provenance.interface_label,
+                    body.provenance.repro_command,
+                    json.dumps(body.provenance.evidence_files, ensure_ascii=False),
+                    json.dumps(body.provenance.traffic_ids, ensure_ascii=False),
+                ),
+            )
         conn.execute(
             "UPDATE intents SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ? WHERE id = ? AND project_id = ?",
             (fid, body.worker, now, now, intent_id, project_id),
@@ -142,6 +167,6 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         ).fetchone()
 
         return ConcludeResponse(
-            fact=Fact(id=fid, description=body.description),
+            fact=Fact(id=fid, description=body.description, provenance=body.provenance),
             intent=intent_to_model(conn, updated, project_id),
         )

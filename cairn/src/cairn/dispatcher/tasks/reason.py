@@ -20,6 +20,7 @@ from cairn.dispatcher.tasks.common import (
     cancel_reason,
     did_timeout,
     preview,
+    record_timeline_prompt,
     run_healthcheck,
     run_worker_process,
     task_healthcheck_enabled,
@@ -225,6 +226,21 @@ def run_reason_task(
                     response.text,
                 )
                 return "failed"
+            completion_intent_id = None
+            if isinstance(response.data, dict):
+                candidate = response.data.get("id")
+                if isinstance(candidate, str) and candidate:
+                    completion_intent_id = candidate
+            if completion_intent_id is not None:
+                record_timeline_prompt(
+                    client,
+                    project.project.id,
+                    f"project-completed-{completion_intent_id}",
+                    prompt,
+                    "reason_execute",
+                    worker.name,
+                    intent_id=completion_intent_id,
+                )
             LOG.info(
                 "project completed project=%s worker=%s from=%s execute_ms=%s total_ms=%s",
                 project.project.id,
@@ -253,6 +269,30 @@ def run_reason_task(
                         response.text,
                     )
                     continue
+                created_intent_id = None
+                if isinstance(response.data, dict):
+                    candidate = response.data.get("id")
+                    if isinstance(candidate, str) and candidate:
+                        created_intent_id = candidate
+                if created_intent_id is not None:
+                    record_timeline_prompt(
+                        client,
+                        project.project.id,
+                        f"reason-started-{created_intent_id}",
+                        prompt,
+                        "reason_execute",
+                        worker.name,
+                        intent_id=created_intent_id,
+                    )
+                    record_timeline_prompt(
+                        client,
+                        project.project.id,
+                        f"intent-declared-{created_intent_id}",
+                        prompt,
+                        "reason_execute",
+                        worker.name,
+                        intent_id=created_intent_id,
+                    )
                 created += 1
                 LOG.info(
                     "reason created intent project=%s worker=%s from=%s description=%s",

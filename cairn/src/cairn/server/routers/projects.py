@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from cairn.server.db import get_conn
+from cairn.server.project_files import delete_project_root
 from cairn.server.models import (
     CompleteRequest,
     CreateProjectRequest,
@@ -18,6 +19,8 @@ from cairn.server.models import (
     UpdateProjectStatusRequest,
 )
 from cairn.server.services import (
+    build_facts,
+    build_timeline_prompts,
     build_intents,
     check_project_completed,
     check_project_active,
@@ -60,6 +63,7 @@ def list_projects():
             ProjectSummary(
                 id=row["id"],
                 title=row["title"],
+                category=row["category"],
                 status=row["status"],
                 bootstrap_enabled=bool(row["bootstrap_enabled"]),
                 created_at=row["created_at"],
@@ -81,8 +85,8 @@ def create_project(body: CreateProjectRequest):
         now = utcnow()
 
         conn.execute(
-            "INSERT INTO projects (id, title, status, bootstrap_enabled, created_at) VALUES (?, ?, 'active', ?, ?)",
-            (pid, body.title, body.bootstrap_enabled, now),
+            "INSERT INTO projects (id, title, category, status, bootstrap_enabled, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
+            (pid, body.title, body.category, body.bootstrap_enabled, now),
         )
         conn.execute(
             "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
@@ -107,6 +111,7 @@ def create_project(body: CreateProjectRequest):
             project=ProjectMeta(
                 id=pid,
                 title=body.title,
+                category=body.category,
                 status="active",
                 bootstrap_enabled=body.bootstrap_enabled,
                 created_at=now,
@@ -118,6 +123,7 @@ def create_project(body: CreateProjectRequest):
             ],
             intents=[],
             hints=hints,
+            timeline_prompts=[],
         )
 
 
@@ -128,9 +134,6 @@ def get_project(project_id: str):
         expire_reason_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
 
-        facts = conn.execute(
-            "SELECT * FROM facts WHERE project_id = ?", (project_id,)
-        ).fetchall()
         hints = conn.execute(
             "SELECT * FROM hints WHERE project_id = ? ORDER BY created_at",
             (project_id,),
@@ -138,9 +141,10 @@ def get_project(project_id: str):
 
         return ProjectDetail(
             project=project_meta_from_row(row),
-            facts=[Fact(**dict(f)) for f in facts],
+            facts=build_facts(conn, project_id),
             intents=build_intents(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            timeline_prompts=build_timeline_prompts(conn, project_id),
         )
 
 
@@ -149,6 +153,7 @@ def delete_project(project_id: str):
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    delete_project_root(project_id)
 
 
 @router.put("/projects/{project_id}/title", response_model=ProjectMeta)

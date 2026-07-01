@@ -29,6 +29,7 @@ def _summary(project_id: str, status: str) -> ProjectSummary:
     return ProjectSummary(
         id=project_id,
         title=project_id,
+        category="未分类",
         status=status,
         bootstrap_enabled=True,
         created_at="2026-01-01T00:00:00Z",
@@ -106,6 +107,76 @@ def test_reap_cleanup_future_records_only_successful_inactive_cleanup() -> None:
     assert loop.cleanup_futures == {}
     assert loop._cleanup_pending == set()
     assert loop._inactive_cleanup_done == {"proj-success": "completed"}
+
+
+def test_queue_container_cleanups_removes_orphan_project_containers() -> None:
+    loop = _loop()
+    submitted: list[tuple[object, tuple[object, ...]]] = []
+
+    class FakeCleanupExecutor:
+        def submit(self, fn, *args):
+            future: Future[bool] = Future()
+            submitted.append((fn, args))
+            return future
+
+    loop.cleanup_executor = FakeCleanupExecutor()
+    loop.container_manager = type(
+        "Containers",
+        (),
+        {
+            "container_name": lambda _self, project_id: f"cairn-dispatch-{project_id}",
+            "managed_container_names": lambda _self: [
+                "cairn-dispatch-active",
+                "cairn-dispatch-deleted",
+            ],
+            "needs_completed_cleanup": lambda _self, _project_id: False,
+            "needs_stopped_cleanup": lambda _self, _project_id: False,
+            "needs_orphan_cleanup": lambda _self, _name: True,
+            "cleanup_orphan": lambda _self, _name: True,
+        },
+    )()
+    loop.futures = {}
+
+    loop._queue_container_cleanups([_summary("active", "active")])
+
+    assert len(submitted) == 1
+    fn, args = submitted[0]
+    assert fn.__name__ == "<lambda>"
+    assert args == ("cairn-dispatch-deleted",)
+    assert loop._cleanup_pending == {"cairn-dispatch-deleted"}
+
+
+def test_queue_container_cleanups_skips_orphan_cleanup_while_deleted_project_task_is_still_running() -> None:
+    loop = _loop()
+    submitted: list[tuple[object, tuple[object, ...]]] = []
+
+    class FakeCleanupExecutor:
+        def submit(self, fn, *args):
+            future: Future[bool] = Future()
+            submitted.append((fn, args))
+            return future
+
+    loop.cleanup_executor = FakeCleanupExecutor()
+    loop.container_manager = type(
+        "Containers",
+        (),
+        {
+            "container_name": lambda _self, project_id: f"cairn-dispatch-{project_id}",
+            "managed_container_names": lambda _self: ["cairn-dispatch-deleted"],
+            "needs_completed_cleanup": lambda _self, _project_id: False,
+            "needs_stopped_cleanup": lambda _self, _project_id: False,
+            "needs_orphan_cleanup": lambda _self, _name: True,
+            "cleanup_orphan": lambda _self, _name: True,
+        },
+    )()
+    loop.futures = {
+        Future(): RunningTask("deleted", "explore", "worker", TaskCancellation(), intent_id="i001")
+    }
+
+    loop._queue_container_cleanups([])
+
+    assert submitted == []
+    assert loop._cleanup_pending == set()
 
 
 def test_choose_worker_prefers_priority_then_lower_running_count() -> None:

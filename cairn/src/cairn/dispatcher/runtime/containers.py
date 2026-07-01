@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import io
 import logging
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+import shutil
 import tarfile
 import threading
 import uuid
@@ -15,6 +16,92 @@ from cairn.dispatcher.config import ContainerConfig
 from cairn.dispatcher.runtime.process import ManagedProcess
 
 LOG = logging.getLogger(__name__)
+TRAFFIC_CONTAINER_ROOT = "/home/kali/workspace/.cairn/traffic"
+TRAFFIC_ADDON_PATH = "/tmp/cairn-traffic-addon.py"
+TRAFFIC_ADDON_SCRIPT = r"""from __future__ import annotations
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import uuid
+
+from mitmproxy import http
+
+TRAFFIC_DIR = Path(os.environ["CAIRN_TRAFFIC_DIR"])
+RECORDS_DIR = TRAFFIC_DIR / "records"
+INDEX_FILE = TRAFFIC_DIR / "index.jsonl"
+PCAP_FILE = "traffic/capture.pcap"
+
+RECORDS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _body_to_text(body: bytes | None) -> str:
+    if not body:
+        return ""
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body.decode("latin-1", errors="replace")
+
+
+def _raw_request(flow: http.HTTPFlow) -> str:
+    request = flow.request
+    head = [f"{request.method} {request.pretty_url} HTTP/1.1"]
+    for key, value in request.headers.items(multi=True):
+        head.append(f"{key}: {value}")
+    return "\r\n".join(head) + "\r\n\r\n" + _body_to_text(request.raw_content)
+
+
+def _raw_response(flow: http.HTTPFlow) -> str | None:
+    response = flow.response
+    if response is None:
+        return None
+    head = [f"HTTP/1.1 {response.status_code} {response.reason}"]
+    for key, value in response.headers.items(multi=True):
+        head.append(f"{key}: {value}")
+    return "\r\n".join(head) + "\r\n\r\n" + _body_to_text(response.raw_content)
+
+
+def _write_record(flow: http.HTTPFlow) -> None:
+    record_id = flow.metadata.get("cairn_traffic_id")
+    if not record_id:
+        record_id = uuid.uuid4().hex[:16]
+        flow.metadata["cairn_traffic_id"] = record_id
+    response = flow.response
+    payload = {
+        "id": record_id,
+        "timestamp": _now(),
+        "scheme": flow.request.scheme,
+        "host": flow.request.host,
+        "port": flow.request.port,
+        "method": flow.request.method,
+        "path": flow.request.path,
+        "url": flow.request.pretty_url,
+        "status_code": response.status_code if response is not None else None,
+        "request_headers": dict(flow.request.headers.items(multi=False)),
+        "response_headers": dict(response.headers.items(multi=False)) if response is not None else {},
+        "raw_request": _raw_request(flow),
+        "raw_response": _raw_response(flow),
+        "pcap_file": PCAP_FILE,
+        "source_file": f"traffic/records/{record_id}.json",
+    }
+    record_path = RECORDS_DIR / f"{record_id}.json"
+    record_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    with INDEX_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def response(flow: http.HTTPFlow) -> None:
+    _write_record(flow)
+
+
+def error(flow: http.HTTPFlow) -> None:
+    _write_record(flow)
+"""
 
 
 class ContainerManager:
@@ -212,6 +299,52 @@ class ContainerManager:
         argv.extend(command)
         return ManagedProcess(container, argv, env)
 
+    def traffic_proxy_env(self) -> dict[str, str]:
+        if not self._config.traffic_enabled:
+            return {}
+        proxy = f"http://{self._config.traffic_proxy_host}:{self._config.traffic_proxy_port}"
+        ca_cert = "/home/kali/.mitmproxy/mitmproxy-ca-cert.pem"
+        return {
+            "HTTP_PROXY": proxy,
+            "HTTPS_PROXY": proxy,
+            "ALL_PROXY": proxy,
+            "http_proxy": proxy,
+            "https_proxy": proxy,
+            "all_proxy": proxy,
+            "NO_PROXY": "127.0.0.1,localhost,cairn-server",
+            "no_proxy": "127.0.0.1,localhost,cairn-server",
+            "REQUESTS_CA_BUNDLE": ca_cert,
+            "CURL_CA_BUNDLE": ca_cert,
+            "SSL_CERT_FILE": ca_cert,
+            "GIT_SSL_CAINFO": ca_cert,
+            "NODE_EXTRA_CA_CERTS": ca_cert,
+        }
+
+    def ensure_project_traffic_capture(self, project_id: str, container_name: str) -> None:
+        if not self._config.traffic_enabled:
+            return
+        self.write_text_file(container_name, TRAFFIC_ADDON_PATH, TRAFFIC_ADDON_SCRIPT)
+        command = f"""
+set -eu
+mkdir -p "{TRAFFIC_CONTAINER_ROOT}/records"
+if [ ! -f "{TRAFFIC_CONTAINER_ROOT}/mitm.pid" ] || ! kill -0 "$(cat "{TRAFFIC_CONTAINER_ROOT}/mitm.pid")" 2>/dev/null; then
+  CAIRN_TRAFFIC_DIR="{TRAFFIC_CONTAINER_ROOT}" nohup mitmdump --listen-host "{self._config.traffic_proxy_host}" --listen-port "{self._config.traffic_proxy_port}" -s "{TRAFFIC_ADDON_PATH}" >"{TRAFFIC_CONTAINER_ROOT}/mitmdump.log" 2>&1 &
+  echo $! > "{TRAFFIC_CONTAINER_ROOT}/mitm.pid"
+  sleep 2
+fi
+if command -v tcpdump >/dev/null 2>&1; then
+  if [ ! -f "{TRAFFIC_CONTAINER_ROOT}/tcpdump.pid" ] || ! kill -0 "$(cat "{TRAFFIC_CONTAINER_ROOT}/tcpdump.pid")" 2>/dev/null; then
+    nohup tcpdump -U -i any -s 0 -w "{TRAFFIC_CONTAINER_ROOT}/capture.pcap" >"{TRAFFIC_CONTAINER_ROOT}/tcpdump.log" 2>&1 &
+    echo $! > "{TRAFFIC_CONTAINER_ROOT}/tcpdump.pid"
+  fi
+fi
+"""
+        container = self._require_container(container_name)
+        result = container.exec_run(["/bin/sh", "-lc", command], stdout=False, stderr=True)
+        exit_code = result.exit_code if hasattr(result, "exit_code") else 0
+        if exit_code not in (0, None):
+            raise RuntimeError(f"failed to start traffic capture for project {project_id}")
+
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
         archive_path, archive = self._text_file_archive(path, content)
         container = self._require_container(container_name)
@@ -221,6 +354,54 @@ class ContainerManager:
             raise RuntimeError(f"failed to write container file {path}: {exc}") from exc
         if not ok:
             raise RuntimeError(f"failed to write container file {path}")
+
+    def copy_file_to_host(self, container_name: str, source_path: str, host_path: Path) -> bool:
+        target = self._validated_container_path(source_path)
+        container = self._require_container(container_name)
+        try:
+            stream, _stat = container.get_archive(str(target))
+        except NotFound:
+            return False
+        except APIError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 404:
+                return False
+            raise RuntimeError(f"failed to read container file {source_path}: {exc}") from exc
+        except DockerException as exc:
+            raise RuntimeError(f"failed to read container file {source_path}: {exc}") from exc
+
+        payload = b"".join(stream)
+        data = self._extract_file_from_archive(payload)
+        if data is None:
+            return False
+
+        destination = Path(host_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        return True
+
+    def copy_path_to_host(self, container_name: str, source_path: str, host_path: Path) -> bool:
+        target = self._validated_container_path(source_path)
+        container = self._require_container(container_name)
+        try:
+            stream, _stat = container.get_archive(str(target))
+        except NotFound:
+            return False
+        except APIError as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 404:
+                return False
+            raise RuntimeError(f"failed to read container path {source_path}: {exc}") from exc
+        except DockerException as exc:
+            raise RuntimeError(f"failed to read container path {source_path}: {exc}") from exc
+
+        payload = b"".join(stream)
+        destination = Path(host_path)
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        self._extract_archive_to_directory(payload, destination)
+        return True
 
     def remove_container(self, name: str, *, force: bool = True) -> None:
         container = self._get_container(name)
@@ -265,13 +446,59 @@ class ContainerManager:
         return status_code == 409 or "is already in use" in explanation
 
     @staticmethod
-    def _text_file_archive(path: str, content: str) -> tuple[str, bytes]:
+    def _validated_container_path(path: str) -> PurePosixPath:
         target = PurePosixPath(path)
         if not target.is_absolute() or target.name in ("", ".", ".."):
             raise ValueError(f"container file path must be absolute: {path}")
         parts = target.parts[1:]
         if not parts or any(part in ("", ".", "..") for part in parts):
             raise ValueError(f"invalid container file path: {path}")
+        return target
+
+    @staticmethod
+    def _extract_file_from_archive(payload: bytes) -> bytes | None:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
+            for member in archive.getmembers():
+                if not member.isfile():
+                    continue
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    continue
+                return extracted.read()
+        return None
+
+    @staticmethod
+    def _extract_archive_to_directory(payload: bytes, destination: Path) -> None:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
+            members = archive.getmembers()
+            prefixes = []
+            for member in members:
+                parts = PurePosixPath(member.name).parts
+                if parts:
+                    prefixes.append(parts[0])
+            strip_prefix = prefixes[0] if prefixes and all(prefix == prefixes[0] for prefix in prefixes) else None
+            for member in members:
+                parts = list(PurePosixPath(member.name).parts)
+                if strip_prefix and parts and parts[0] == strip_prefix:
+                    parts = parts[1:]
+                if not parts:
+                    continue
+                if any(part in ("", ".", "..") for part in parts):
+                    continue
+                target = destination.joinpath(*parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    continue
+                target.write_bytes(extracted.read())
+
+    @staticmethod
+    def _text_file_archive(path: str, content: str) -> tuple[str, bytes]:
+        target = ContainerManager._validated_container_path(path)
+        parts = target.parts[1:]
         if len(parts) == 1:
             archive_path = "/"
             archive_parts = parts

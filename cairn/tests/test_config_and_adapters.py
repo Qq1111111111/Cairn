@@ -46,6 +46,17 @@ def test_dispatch_config_rejects_duplicate_workers_and_excess_project_parallelis
         DispatchConfig.model_validate(payload)
 
 
+def test_dispatch_config_load_resolves_relative_artifact_mirror_dir(tmp_path) -> None:
+    config_path = tmp_path / "dispatch.yaml"
+    payload = make_config().model_dump(mode="json")
+    payload["container"]["artifact_mirror_dir"] = "./datas/artifacts"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = DispatchConfig.load(config_path)
+
+    assert config.container.artifact_mirror_dir == (tmp_path / "datas" / "artifacts").resolve()
+
+
 def test_pi_worker_rejects_invalid_context_window() -> None:
     with pytest.raises(ValidationError, match="PI_MODEL_CONTEXT_WINDOW must be greater than 0"):
         WorkerConfig.model_validate(

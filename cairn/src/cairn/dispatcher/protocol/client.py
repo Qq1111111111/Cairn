@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import logging
+import os
 import threading
 
 from pydantic import TypeAdapter
@@ -107,11 +108,22 @@ class CairnClient:
             json={"worker": worker},
         )
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
+    def conclude(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        description: str,
+        *,
+        provenance: dict[str, Any] | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {"worker": worker, "description": description}
+        if provenance is not None:
+            payload["provenance"] = provenance
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents/{intent_id}/conclude",
-            json={"worker": worker, "description": description},
+            json=payload,
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
@@ -126,6 +138,30 @@ class CairnClient:
             "POST",
             f"/projects/{project_id}/intents",
             json={"from": from_ids, "description": description, "creator": creator, "worker": None},
+        )
+
+    def record_timeline_prompt(
+        self,
+        project_id: str,
+        timeline_entry_id: str,
+        prompt_text: str,
+        phase: str,
+        worker: str,
+        *,
+        intent_id: str | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {
+            "timeline_entry_id": timeline_entry_id,
+            "prompt_text": prompt_text,
+            "phase": phase,
+            "worker": worker,
+        }
+        if intent_id is not None:
+            payload["intent_id"] = intent_id
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/timeline-prompts",
+            json=payload,
         )
 
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
@@ -153,6 +189,9 @@ class CairnClient:
             return session
 
         session = requests.Session()
+        internal_token = os.getenv("CAIRN_INTERNAL_TOKEN")
+        if internal_token:
+            session.headers["x-cairn-internal-token"] = internal_token
         adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)
         session.mount("http://", adapter)
         session.mount("https://", adapter)

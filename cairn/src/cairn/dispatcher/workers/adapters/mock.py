@@ -74,45 +74,45 @@ if phase=="reason":
     max_i=prompt.get("max_intents",3)
     from_ids=[random.choice(fact_ids)] if fact_ids else []
     if outcome=="complete":
-        print(json.dumps({"accepted":True,"data":{"complete":{"from":from_ids,"description":f"mock complete from {from_ids[0]}"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"complete":{"from":from_ids,"description":f"模拟完成，依据 {from_ids[0]}"}}}, ensure_ascii=False))
     elif outcome=="intent":
         count=random.randint(1,max(1,max_i))
         intents=[]
         for idx in range(count):
             fi=[random.choice(fact_ids)] if fact_ids else []
-            intents.append({"from":fi,"description":f"mock intent {idx+1} from {fi[0] if fi else 'none'}"})
+            intents.append({"from":fi,"description":f"模拟意图{idx+1}，基于 {fi[0] if fi else 'none'} 继续探索"})
         print(json.dumps({"accepted":True,"data":{"intents":intents}}, ensure_ascii=False))
     elif outcome=="noop":
         print(json.dumps({"accepted":True,"data":{}}, ensure_ascii=False))
     elif outcome=="rejected":
         print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
     else:
-        print(json.dumps({"accepted":True,"data":{"complete":{"description":"mock invalid payload"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"complete":{"description":"模拟无效载荷"}}}, ensure_ascii=False))
     raise SystemExit(0)
 
 if phase=="bootstrap":
     if outcome=="complete":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap"},"complete":{"description":"mock bootstrap complete from fact"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"模拟启动阶段事实"},"complete":{"description":"模拟启动阶段已完成，可由该事实证明"}}}, ensure_ascii=False))
     elif outcome=="fact":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact-only bootstrap result"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"模拟启动阶段结果事实"}}}, ensure_ascii=False))
     elif outcome=="rejected":
         print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
     else:
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock invalid payload"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"模拟无效载荷"}}}, ensure_ascii=False))
     raise SystemExit(0)
 
 if phase=="bootstrap_conclude":
     if outcome=="fact":
-        print(json.dumps({"accepted":True,"data":{"fact":{"description":"mock fact for bootstrap_conclude"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"fact":{"description":"模拟启动总结事实"}}}, ensure_ascii=False))
     elif outcome=="rejected":
         print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
     else:
-        print(json.dumps({"accepted":True,"data":{"complete":{"description":"mock invalid payload"}}}, ensure_ascii=False))
+        print(json.dumps({"accepted":True,"data":{"complete":{"description":"模拟无效载荷"}}}, ensure_ascii=False))
     raise SystemExit(0)
 
 if outcome=="fact":
     label = prompt.get("intent_id") or phase
-    print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}"}} , ensure_ascii=False))
+    print(json.dumps({"accepted":True,"data":{"description":f"模拟事实：{label}"}} , ensure_ascii=False))
 elif outcome=="rejected":
     print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
 else:

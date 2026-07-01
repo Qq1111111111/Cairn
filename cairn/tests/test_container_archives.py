@@ -33,3 +33,22 @@ def test_text_file_archive_rejects_unsafe_paths(path: str) -> None:
     with pytest.raises(ValueError):
         ContainerManager._text_file_archive(path, "content")
 
+
+def test_copy_file_to_host_extracts_file_payload(tmp_path) -> None:
+    manager = ContainerManager.__new__(ContainerManager)
+
+    class FakeContainer:
+        def get_archive(self, _path: str):
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w") as archive:
+                payload = b'{"ok":true}\n'
+                info = tarfile.TarInfo("result.json")
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+            return [stream.getvalue()], {"name": "result.json"}
+
+    manager._require_container = lambda _name: FakeContainer()
+    host_path = tmp_path / "mirrored" / "result.json"
+
+    assert manager.copy_file_to_host("container", "/home/kali/workspace/result.json", host_path)
+    assert host_path.read_text(encoding="utf-8") == '{"ok":true}\n'

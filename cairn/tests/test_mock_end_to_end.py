@@ -64,10 +64,18 @@ class InProcessClient:
     def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
         return self._post(f"/projects/{project_id}/intents/{intent_id}/release", {"worker": worker})
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
+    def conclude(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        description: str,
+        *,
+        provenance: dict[str, Any] | None = None,
+    ) -> ApiResult:
         return self._post(
             f"/projects/{project_id}/intents/{intent_id}/conclude",
-            {"worker": worker, "description": description},
+            {"worker": worker, "description": description, **({"provenance": provenance} if provenance else {})},
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
@@ -81,6 +89,26 @@ class InProcessClient:
             f"/projects/{project_id}/intents",
             {"from": from_ids, "description": description, "creator": creator, "worker": None},
         )
+
+    def record_timeline_prompt(
+        self,
+        project_id: str,
+        timeline_entry_id: str,
+        prompt_text: str,
+        phase: str,
+        worker: str,
+        *,
+        intent_id: str | None = None,
+    ) -> ApiResult:
+        payload: dict[str, Any] = {
+            "timeline_entry_id": timeline_entry_id,
+            "prompt_text": prompt_text,
+            "phase": phase,
+            "worker": worker,
+        }
+        if intent_id is not None:
+            payload["intent_id"] = intent_id
+        return self._post(f"/projects/{project_id}/timeline-prompts", payload)
 
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)
@@ -324,10 +352,10 @@ def test_mock_scheduler_runs_reason_explore_reason_complete_chain(http_client: T
         containers,
     )
     project_id = _create_project(http_client)
-    seed = client.create_intent(project_id, ["origin"], "seed", "seed-worker")
+    seed = client.create_intent(project_id, ["origin"], "种子探索意图", "seed-worker")
     assert seed.ok
     assert client.heartbeat(project_id, "i001", "seed-worker").ok
-    assert client.conclude(project_id, "i001", "seed-worker", "seed fact").ok
+    assert client.conclude(project_id, "i001", "seed-worker", "种子事实结果").ok
 
     try:
         _dispatch_and_wait(loop)

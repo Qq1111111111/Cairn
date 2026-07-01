@@ -228,6 +228,28 @@
 </head>
 <body class="bg-slate-50 text-slate-800 h-screen flex flex-col overflow-hidden" :class="{ 'select-none cursor-col-resize': isResizingPanel }" x-data="cairnApp()">
 
+<div x-show="authEnabled && !authenticated" x-cloak class="fixed inset-0 z-[100] bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-6">
+  <div class="w-full max-w-md rounded-3xl border border-slate-200 bg-white shadow-2xl p-8">
+    <div class="flex items-center gap-3 mb-6">
+      <img src="/static/favicon.svg" alt="" class="w-10 h-10">
+      <div>
+        <h1 class="text-lg font-semibold text-slate-800">Cairn 登录</h1>
+        <p class="text-sm text-slate-400">继续前请先通过身份验证</p>
+      </div>
+    </div>
+    <div class="space-y-3">
+      <input x-model="loginForm.username" @keydown.enter.prevent="login()" placeholder="用户名" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition">
+      <input x-model="loginForm.password" @keydown.enter.prevent="login()" type="password" placeholder="密码" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition">
+      <template x-if="loginError">
+        <p class="text-sm text-rose-500" x-text="loginError"></p>
+      </template>
+      <button @click="login()" :disabled="loginBusy || !loginForm.username || !loginForm.password" class="w-full px-4 py-2.5 rounded-xl bg-brand-500 text-white text-sm font-medium hover:bg-brand-600 disabled:opacity-40 disabled:cursor-not-allowed transition">
+        <span x-text="loginBusy ? '登录中...' : '登录'"></span>
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ═══════════ PROJECT LIST VIEW ═══════════ -->
 <div x-show="view === 'list'" x-cloak class="flex-1 flex flex-col overflow-hidden">
   <header class="bg-white/80 backdrop-blur border-b border-slate-200/60 px-4 py-2.5 flex items-center gap-3 shrink-0">
@@ -274,6 +296,9 @@
       <button @click="showLocalPrefs = true" class="h-7 max-w-40 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center shrink-0">
         <span class="truncate block" x-text="actorName()"></span>
       </button>
+      <button x-show="authEnabled" @click="logout()" class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center gap-1 shrink-0">
+        <span class="truncate max-w-24" x-text="authUser || '退出'"></span>
+      </button>
       <button @click="loadSettings(); showSettings = true" class="h-7 w-7 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition inline-flex items-center justify-center shrink-0">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7 7 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a7 7 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a7 7 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a7 7 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28Z"/><path d="M15 12a3 3 0 1 1-6 0-3 3 0 0 1 6 0Z"/></svg>
       </button>
@@ -289,8 +314,15 @@
       </div>
     </template>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-      <template x-for="p in projects" :key="p.id">
+    <div class="space-y-6">
+      <template x-for="group in groupedProjects()" :key="group.category">
+        <section class="space-y-3">
+          <div class="flex items-center gap-2">
+            <span class="px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 text-xs font-medium" x-text="group.category"></span>
+            <span class="text-xs text-slate-400" x-text="`${group.items.length} 个项目`"></span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+      <template x-for="p in group.items" :key="p.id">
         <div @click="openProject(p.id)"
           class="group h-full flex flex-col bg-white rounded-2xl border border-slate-200/60 p-5 cursor-pointer transition-all duration-200 hover:shadow-lg hover:shadow-slate-200/50 hover:border-slate-300 hover:-translate-y-0.5">
           <div class="flex items-start justify-between mb-3">
@@ -311,6 +343,9 @@
               </button>
             </div>
             <div class="mt-2 flex flex-wrap items-center gap-1.5">
+              <div class="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-medium text-slate-500">
+                <span x-text="p.category || '未分类'"></span>
+              </div>
               <template x-if="p.reason">
                 <div class="inline-flex items-center gap-1.5 rounded-full border border-sky-200 bg-sky-50 px-2 py-1 text-[10px] font-medium text-sky-700 reason-chip-running">
                   <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 3v3"/><path d="M18.364 5.636 16.95 7.05"/><path d="M21 12h-3"/><path d="m18.364 18.364-1.414-1.414"/><path d="M12 21v-3"/><path d="m7.05 16.95-1.414 1.414"/><path d="M6 12H3"/><path d="M7.05 7.05 5.636 5.636"/><circle cx="12" cy="12" r="3.5"/></svg>
@@ -388,6 +423,9 @@
             </div>
           </div>
         </div>
+      </template>
+          </div>
+        </section>
       </template>
     </div>
   </div>
@@ -475,6 +513,9 @@
     <div class="flex items-center gap-1.5 ml-1">
       <button @click="showLocalPrefs = true" class="h-7 max-w-40 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center shrink-0">
         <span class="truncate block" x-text="actorName()"></span>
+      </button>
+      <button x-show="authEnabled" @click="logout()" class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center gap-1 shrink-0">
+        <span class="truncate max-w-24" x-text="authUser || '退出'"></span>
       </button>
       <button @click="loadSettings(); showSettings = true" class="h-7 w-7 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition inline-flex items-center justify-center shrink-0">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7 7 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a7 7 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a7 7 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a7 7 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28Z"/><path d="M15 12a3 3 0 1 1-6 0-3 3 0 0 1 6 0Z"/></svg>
@@ -583,7 +624,9 @@
           Hints <span class="ml-0.5 text-[10px] opacity-60" x-text="project.hints.length"></span>
         </button>
         <button @click="sideTab = 'log'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
-          :class="sideTab === 'log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Log</button>
+          :class="sideTab === 'log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">日志</button>
+        <button @click="openTrafficTab()" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+          :class="sideTab === 'traffic' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">流量</button>
       </div>
 
       <!-- Detail -->
@@ -676,6 +719,21 @@
                     <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Concluded</span><span class="text-slate-600 text-right break-words" x-text="formatTime(selectedFactProducingIntent().concluded_at || selectedFactProducingIntent().created_at)"></span></div>
                   </div>
                 </template>
+                <template x-if="selectedFactRecord().provenance">
+                  <div class="pt-4 border-t border-slate-100 space-y-3">
+                    <p class="text-[10px] font-semibold text-teal-500 uppercase tracking-widest">Evidence</p>
+                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Interface</span><span class="text-slate-600 text-right break-all" x-text="selectedFactRecord().provenance.interface_label || selectedFactRecord().provenance.url || '—'"></span></div>
+                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Method</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedFactRecord().provenance.method || '—'"></span></div>
+                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Path</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedFactRecord().provenance.path || '—'"></span></div>
+                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">复现</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedFactRecord().provenance.repro_command || '—'"></span></div>
+                    <div class="flex flex-wrap gap-2 pt-1">
+                      <button @click="openTrafficForFact(selectedFactRecord())" class="px-2 py-1 rounded-lg border border-teal-200 text-[11px] text-teal-600 hover:bg-teal-50 transition">查流量</button>
+                      <template x-for="file in selectedFactRecord().provenance.evidence_files || []" :key="file">
+                        <a :href="`/projects/${selectedProjectId}/files/${file}`" target="_blank" class="px-2 py-1 rounded-lg border border-slate-200 text-[11px] text-slate-600 hover:bg-slate-50 transition break-all" x-text="file"></a>
+                      </template>
+                    </div>
+                  </div>
+                </template>
               </div>
             </div>
           </section>
@@ -739,7 +797,7 @@
             <div class="space-y-2.5">
               <div class="space-y-1">
                 <div class="flex items-center justify-between gap-3 text-[11px]">
-                  <span class="text-slate-400">Sequence</span>
+                  <span class="text-slate-400">序号</span>
                   <span class="font-mono text-slate-600" x-text="selectedTimelineSummary().sequenceLabel"></span>
                 </div>
                 <div class="h-1.5 rounded-full bg-slate-100 overflow-hidden">
@@ -748,7 +806,7 @@
               </div>
               <div class="space-y-1">
                 <div class="flex items-center justify-between gap-3 text-[11px]">
-                  <span class="text-slate-400">Time Span</span>
+                  <span class="text-slate-400">时间跨度</span>
                   <span class="font-mono text-slate-600 text-right" x-text="selectedTimelineSummary().timeLabel"></span>
                 </div>
                 <div class="h-1.5 rounded-full bg-slate-100 overflow-hidden">
@@ -759,7 +817,7 @@
           </section>
         </template>
         <template x-if="timelineEvents().length === 0">
-          <p class="text-sm text-slate-300 text-center mt-12">No activity yet</p>
+          <p class="text-sm text-slate-300 text-center mt-12">暂无事件</p>
         </template>
         <template x-for="entry in timelineEvents()" :key="entry.id">
           <div class="flex items-stretch gap-3" :id="timelineEntryDomId(entry.id)">
@@ -767,23 +825,91 @@
               <div class="w-2.5 h-2.5 rounded-full mt-1.5" :class="timelineEventDotClass(entry)"></div>
               <div class="w-px flex-1 bg-slate-100 mt-2" x-show="!entry.isLast"></div>
             </div>
-            <button type="button" @click="openTimelineEntry(entry)"
-              class="min-w-0 flex-1 text-left rounded-xl px-0.5 py-0.5 transition"
+            <div
+              @click="handleTimelineEntryClick($event, entry)"
+              @keydown.enter.prevent="handleTimelineEntryClick($event, entry)"
+              @keydown.space.prevent="handleTimelineEntryClick($event, entry)"
+              :role="timelineEventIsInteractive(entry) ? 'button' : null"
+              :tabindex="timelineEventIsInteractive(entry) ? 0 : null"
+              class="min-w-0 flex-1 text-left rounded-xl px-2 py-1.5 transition"
               :class="timelineEntryButtonClass(entry)">
-              <div class="flex flex-wrap items-center gap-2">
+              <div class="flex flex-wrap items-center gap-2 min-w-0">
                 <span class="text-[11px] font-medium text-slate-400 tabular-nums" x-text="formatTime(entry.timestamp)"></span>
                 <span class="px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide"
                   :class="timelineEventBadgeClass(entry)" x-text="timelineEventBadge(entry)"></span>
                 <span class="text-[11px] text-slate-300" x-text="formatTimelineDate(entry.timestamp)"></span>
+                <button
+                  x-show="timelineEntryPromptAvailable(entry)"
+                  type="button"
+                  @click.stop="openPromptForTimelineEntry(entry)"
+                  class="ml-auto shrink-0 px-2 py-0.5 rounded-md border border-slate-200 text-[10px] font-medium text-slate-500 hover:bg-white hover:text-slate-700 transition">
+                  查看 Prompt
+                </button>
+                <button
+                  x-show="timelineEntryEvidenceAvailable(entry)"
+                  type="button"
+                  @click.stop="jumpToTimelineEvidence(entry)"
+                  class="shrink-0 px-2 py-0.5 rounded-md border border-teal-200 text-[10px] font-medium text-teal-600 hover:bg-white hover:text-teal-700 transition">
+                  查看证据
+                </button>
               </div>
               <template x-if="entry.title">
-                <p class="text-sm text-slate-700 leading-relaxed break-words mt-1" x-text="entry.title"></p>
+                <p class="text-sm text-slate-700 leading-relaxed break-words mt-1 select-text" x-text="entry.title"></p>
               </template>
               <template x-if="entry.actor || entry.meta.length > 0">
-                <p class="text-[11px] text-slate-400 mt-1 break-words" x-text="[entry.actor, ...entry.meta].filter(Boolean).join(' · ')"></p>
+                <p class="text-[11px] text-slate-400 mt-1 break-words select-text" x-text="[entry.actor, ...entry.meta].filter(Boolean).join(' · ')"></p>
               </template>
-            </button>
+            </div>
           </div>
+        </template>
+      </div>
+
+      <div x-show="sideTab === 'traffic'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/30">
+        <div class="rounded-2xl border border-slate-200 bg-white shadow-sm p-3 space-y-3">
+          <div class="flex gap-2">
+            <input x-model="trafficQuery" @keydown.enter.prevent="searchTraffic()" placeholder="搜索 host、URL、path、raw HTTP/HTTPS" class="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition">
+            <button @click="searchTraffic()" :disabled="trafficLoading" class="px-3 py-2 rounded-xl bg-brand-500 text-white text-sm hover:bg-brand-600 disabled:opacity-40 transition">搜索</button>
+          </div>
+          <p class="text-[11px] text-slate-400">数据来自 MITM 解密索引，pcap 作为旁路留证保存在项目本地目录。</p>
+        </div>
+        <template x-if="trafficResults.length === 0 && !trafficLoading">
+          <div class="rounded-2xl border border-dashed border-slate-200 bg-white/80 px-5 py-10 text-center shadow-sm text-sm text-slate-400">暂无流量记录</div>
+        </template>
+        <template x-for="record in trafficResults" :key="record.id">
+          <button type="button" @click="openTrafficRecord(record.id)" class="w-full text-left rounded-2xl border border-slate-200 bg-white shadow-sm p-3 transition hover:bg-slate-50">
+            <div class="flex items-center gap-2 text-[11px] text-slate-400">
+              <span class="font-mono" x-text="record.id"></span>
+              <span x-text="formatTime(record.timestamp)"></span>
+              <span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium" x-text="record.method"></span>
+              <span class="truncate" x-text="record.host"></span>
+              <span x-show="record.status_code !== null" class="ml-auto text-slate-500" x-text="record.status_code"></span>
+            </div>
+            <p class="mt-1 text-sm text-slate-700 break-all" x-text="record.url"></p>
+            <template x-if="record.matched_excerpt">
+              <p class="mt-1 text-xs text-slate-400 break-words" x-text="record.matched_excerpt"></p>
+            </template>
+          </button>
+        </template>
+        <template x-if="selectedTraffic">
+          <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+            <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80 flex items-center justify-between gap-3">
+              <div>
+                <p class="text-sm font-semibold text-slate-700 break-all" x-text="selectedTraffic.url"></p>
+                <p class="text-[11px] text-slate-400 mt-1" x-text="`${selectedTraffic.id} · ${selectedTraffic.method} · ${selectedTraffic.host}:${selectedTraffic.port}`"></p>
+              </div>
+              <a x-show="selectedTraffic.pcap_file" :href="`/projects/${selectedProjectId}/files/${selectedTraffic.pcap_file}`" target="_blank" class="px-2 py-1 rounded-lg border border-slate-200 text-[11px] text-slate-500 hover:bg-white transition">PCAP</a>
+            </div>
+            <div class="p-4 space-y-4">
+              <div>
+                <p class="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">Raw Request</p>
+                <pre class="rounded-xl bg-slate-950 text-emerald-200 text-xs p-3 overflow-x-auto whitespace-pre-wrap select-text" x-text="selectedTraffic.raw_request"></pre>
+              </div>
+              <div>
+                <p class="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">Raw Response</p>
+                <pre class="rounded-xl bg-slate-950 text-sky-200 text-xs p-3 overflow-x-auto whitespace-pre-wrap select-text" x-text="selectedTraffic.raw_response || 'No response body'"></pre>
+              </div>
+            </div>
+          </section>
         </template>
       </div>
     </div>
@@ -799,6 +925,7 @@
     <h3 class="text-base font-semibold text-slate-700 mb-4">New Project</h3>
     <div class="space-y-3">
       <input x-model="newProject.title" placeholder="Project title" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300">
+      <input x-model="newProject.category" placeholder="Project category" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300">
       <textarea x-model="newProject.origin" placeholder="Origin — starting point" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300"></textarea>
       <textarea x-model="newProject.goal" placeholder="Goal — what to achieve" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300"></textarea>
       <label class="flex items-center gap-2 px-1 text-sm text-slate-600">
@@ -1053,6 +1180,45 @@
         <span x-text="isDeletingProject ? 'Deleting...' : 'Delete'"></span>
       </button>
     </div>
+</div>
+</div>
+
+<!-- Prompt Preview -->
+<div x-show="showPromptModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center overlay" @click.self="closePromptModal()">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-5xl mx-4 border border-slate-200/60 overflow-hidden" @click.stop>
+    <div class="px-5 py-4 border-b border-slate-200/80 flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="text-base font-semibold text-slate-700">Prompt 详情</h3>
+        <p class="text-xs text-slate-400 mt-1 break-all" x-text="promptPreview.subtitle"></p>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <button @click="copyPromptPreview()" class="px-3 py-1.5 text-sm text-slate-500 hover:bg-slate-50 rounded-xl transition">复制</button>
+        <button @click="closePromptModal()" class="px-3 py-1.5 text-sm text-slate-500 hover:bg-slate-50 rounded-xl transition">关闭</button>
+      </div>
+    </div>
+    <div class="px-5 py-4 bg-slate-50 border-b border-slate-200/80 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+      <div class="rounded-xl border border-slate-200 bg-white px-3 py-2">
+        <div class="text-slate-400">日志类型</div>
+        <div class="mt-1 text-slate-700 font-medium" x-text="promptPreview.entryType"></div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white px-3 py-2">
+        <div class="text-slate-400">Prompt 阶段</div>
+        <div class="mt-1 text-slate-700 font-medium" x-text="promptPreview.phaseLabel"></div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white px-3 py-2">
+        <div class="text-slate-400">执行者</div>
+        <div class="mt-1 text-slate-700 font-medium" x-text="promptPreview.worker"></div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white px-3 py-2">
+        <div class="text-slate-400">时间</div>
+        <div class="mt-1 text-slate-700 font-medium" x-text="formatDate(promptPreview.createdAt)"></div>
+      </div>
+    </div>
+    <div class="max-h-[68vh] overflow-auto bg-slate-50 p-4">
+      <div class="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+        <pre class="p-4 text-[12px] leading-6 font-mono whitespace-pre-wrap break-words select-text text-slate-800" x-text="promptPreview.promptText"></pre>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1072,6 +1238,12 @@
 <script>
 function cairnApp() {
   return {
+    authEnabled: false,
+    authenticated: true,
+    authUser: '',
+    loginForm: { username: '', password: '' },
+    loginError: '',
+    loginBusy: false,
     view: 'list',
     projects: [],
     project: null,
@@ -1097,11 +1269,16 @@ function cairnApp() {
     showLocalPrefs: false,
     showSettings: false,
     showYamlModal: false,
+    showPromptModal: false,
     exportTab: 'yaml',
     exportProjectId: '',
     showDeleteModal: false,
+    trafficQuery: '',
+    trafficResults: [],
+    selectedTraffic: null,
+    trafficLoading: false,
 
-    newProject: { title: '', origin: '', goal: '', bootstrap: true, hints: [{ content: '' }] },
+    newProject: { title: '', category: '未分类', origin: '', goal: '', bootstrap: true, hints: [{ content: '' }] },
     intentForm: { description: '' },
     concludeForm: { description: '', intentId: '' },
     completeForm: { description: '' },
@@ -1115,6 +1292,16 @@ function cairnApp() {
     yamlPreviewTitle: '',
     yamlPreviewText: '',
     yamlPreviewHtml: '',
+    promptPreview: {
+      entryId: '',
+      subtitle: '',
+      entryType: '',
+      phase: '',
+      phaseLabel: '',
+      worker: '',
+      createdAt: '',
+      promptText: '',
+    },
     toast: { show: false, message: '', type: 'info' },
     replay: {
       active: false,
@@ -1138,15 +1325,18 @@ function cairnApp() {
       this._panelResizeStop = () => this.stopPanelResize();
       window.addEventListener('pointermove', this._panelResizeMove);
       window.addEventListener('pointerup', this._panelResizeStop);
+      window.addEventListener('hashchange', () => this.handleRoute());
       this.loadLocalPrefs();
+      await this.loadSession();
+      if (this.authEnabled && !this.authenticated) return;
       await this.loadProjects();
       await this.loadSettings();
       this.startPolling();
-      window.addEventListener('hashchange', () => this.handleRoute());
       this.handleRoute();
     },
 
     handleRoute() {
+      if (this.authEnabled && !this.authenticated) return;
       const hash = location.hash || '#/';
       const m = hash.match(/^#\/projects\/(.+)$/);
       if (m) {
@@ -1163,6 +1353,10 @@ function cairnApp() {
       const opts = { method, headers: { 'Content-Type': 'application/json' } };
       if (body) opts.body = JSON.stringify(body);
       const r = await fetch(path, opts);
+      if (r.status === 401) {
+        this.handleAuthFailure();
+        throw new Error('请先登录');
+      }
       if (r.status === 204) return null;
       const data = await r.json();
       if (!r.ok) {
@@ -1176,6 +1370,10 @@ function cairnApp() {
 
     async fetchText(path) {
       const r = await fetch(path);
+      if (r.status === 401) {
+        this.handleAuthFailure();
+        throw new Error('请先登录');
+      }
       const text = await r.text();
       if (!r.ok) {
         let detail = text;
@@ -1262,6 +1460,62 @@ function cairnApp() {
       return this.localPrefs.actor_name.trim() || 'Human';
     },
 
+    handleAuthFailure() {
+      this.authenticated = false;
+      this.authUser = '';
+      this.stopPolling();
+    },
+
+    async loadSession() {
+      try {
+        const session = await fetch('/auth/session').then(r => r.json());
+        this.authEnabled = !!session.enabled;
+        this.authenticated = !!session.authenticated;
+        this.authUser = session.username || '';
+        if (!this.loginForm.username) this.loginForm.username = this.authUser || 'admin';
+      } catch (e) {
+        console.error(e);
+      }
+    },
+
+    async login() {
+      if (this.loginBusy) return;
+      this.loginBusy = true;
+      this.loginError = '';
+      try {
+        await this.api('POST', '/auth/login', this.loginForm);
+        await this.loadSession();
+        await this.loadProjects();
+        await this.loadSettings();
+        this.startPolling();
+        this.handleRoute();
+      } catch (e) {
+        this.loginError = e.message;
+      } finally {
+        this.loginBusy = false;
+      }
+    },
+
+    async logout() {
+      try {
+        await this.api('POST', '/auth/logout', {});
+      } catch (e) {
+        console.error(e);
+      }
+      this.authenticated = false;
+      this.authUser = '';
+      this.project = null;
+      this.projects = [];
+      this.selectedProjectId = '';
+      this.stopPolling();
+    },
+
+    stopPolling() {
+      if (!this.pollTimer) return;
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    },
+
     projectStatusBadgeClass(status) {
       const classes = {
         active: 'bg-teal-50 text-teal-600',
@@ -1320,6 +1574,21 @@ function cairnApp() {
       return this.projects.some(project => project.status === 'active');
     },
 
+    groupedProjects() {
+      const groups = new Map();
+      for (const project of this.projects) {
+        const category = (project.category || '未分类').trim() || '未分类';
+        if (!groups.has(category)) groups.set(category, []);
+        groups.get(category).push(project);
+      }
+      return [...groups.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0], 'zh-Hans-CN'))
+        .map(([category, items]) => ({
+          category,
+          items: items.sort((a, b) => a.created_at.localeCompare(b.created_at)),
+        }));
+    },
+
     projectCanWriteHints() {
       return !this.replay.active && ['active', 'stopped', 'completed'].includes(this.project?.project?.status);
     },
@@ -1329,6 +1598,7 @@ function cairnApp() {
     },
 
     async loadProjects() {
+      if (this.authEnabled && !this.authenticated) return;
       try { this.projects = await this.api('GET', '/projects'); } catch(e) { console.error(e); }
     },
 
@@ -1436,6 +1706,156 @@ function cairnApp() {
         }
       } finally {
         document.body.removeChild(textarea);
+      }
+    },
+
+    timelinePromptMap() {
+      const promptOwner = this.replay.active ? this.replay.sourceProject : this.project;
+      const prompts = promptOwner?.timeline_prompts || [];
+      return new Map(prompts.map(prompt => [prompt.timeline_entry_id, prompt]));
+    },
+
+    timelinePromptForEntry(entry) {
+      if (!entry || !this.project) return null;
+      const prompts = this.timelinePromptMap();
+      const direct = prompts.get(entry.id);
+      if (direct) return direct;
+      if (entry.type === 'reason_started' && entry.intentId) {
+        return prompts.get(`reason-started-${entry.intentId}`)
+          || prompts.get(`intent-declared-${entry.intentId}`)
+          || null;
+      }
+      if (entry.type === 'intent_running' && entry.intentId) {
+        return prompts.get(`intent-running-${entry.intentId}`)
+          || prompts.get(`intent-concluded-${entry.intentId}`)
+          || prompts.get(`project-completed-${entry.intentId}`)
+          || null;
+      }
+      return null;
+    },
+
+    timelineEntryPromptAvailable(entry) {
+      return !!this.timelinePromptForEntry(entry);
+    },
+
+    timelineEntryEvidenceAvailable(entry) {
+      const fact = this.factRecordForTimelineEntry(entry);
+      return !!fact?.provenance;
+    },
+
+    factRecordForTimelineEntry(entry) {
+      if (!entry || entry.targetType !== 'fact' || !entry.targetId) return null;
+      return this.getFactRecord(entry.targetId);
+    },
+
+    jumpToTimelineEvidence(entry) {
+      const fact = this.factRecordForTimelineEntry(entry);
+      if (!fact?.provenance) return;
+      this.openTimelineEntry(entry);
+      this.openTrafficForFact(fact);
+    },
+
+    timelinePromptPhaseLabel(phase) {
+      const labels = {
+        reason_execute: '推理执行',
+        explore_execute: '探索执行',
+        explore_conclude: '探索总结',
+        bootstrap_execute: 'Bootstrap 执行',
+        bootstrap: 'Bootstrap 执行',
+        bootstrap_conclude: 'Bootstrap 总结',
+      };
+      return labels[phase] || phase || '未知阶段';
+    },
+
+    selectionLooksActive() {
+      const selection = window.getSelection?.();
+      return !!selection && !selection.isCollapsed && selection.toString().trim().length > 0;
+    },
+
+    handleTimelineEntryClick(event, entry) {
+      if (this.selectionLooksActive()) return;
+      this.openTimelineEntry(entry);
+      if (this.timelineEntryPromptAvailable(entry)) {
+        this.openPromptForTimelineEntry(entry);
+      }
+    },
+
+    openPromptForTimelineEntry(entry) {
+      const prompt = this.timelinePromptForEntry(entry);
+      if (!prompt) return;
+      const parts = [entry?.title, entry?.intentId, prompt.timeline_entry_id].filter(Boolean);
+      this.promptPreview = {
+        entryId: prompt.timeline_entry_id,
+        subtitle: parts.join(' · '),
+        entryType: this.timelineEventBadge(entry),
+        phase: prompt.phase,
+        phaseLabel: this.timelinePromptPhaseLabel(prompt.phase),
+        worker: prompt.worker,
+        createdAt: prompt.created_at,
+        promptText: prompt.prompt_text,
+      };
+      this.showPromptModal = true;
+    },
+
+    closePromptModal() {
+      this.showPromptModal = false;
+    },
+
+    async openTrafficTab() {
+      this.sideTab = 'traffic';
+      if (this.trafficResults.length === 0) {
+        await this.searchTraffic();
+      }
+    },
+
+    trafficQueryFromProvenance(provenance) {
+      if (!provenance) return '';
+      return provenance.url || provenance.path || provenance.host || provenance.interface_label || '';
+    },
+
+    async searchTraffic(query = null) {
+      if (!this.selectedProjectId) return;
+      this.trafficLoading = true;
+      try {
+        const q = query === null ? this.trafficQuery : query;
+        if (query !== null) this.trafficQuery = query;
+        const encoded = encodeURIComponent(q || '');
+        this.trafficResults = await this.api('GET', `/projects/${this.selectedProjectId}/traffic?q=${encoded}`);
+        this.selectedTraffic = null;
+      } catch (e) {
+        this.showToast(e.message, 'error');
+      } finally {
+        this.trafficLoading = false;
+      }
+    },
+
+    async openTrafficRecord(recordId) {
+      if (!recordId || !this.selectedProjectId) return;
+      this.sideTab = 'traffic';
+      try {
+        this.selectedTraffic = await this.api('GET', `/projects/${this.selectedProjectId}/traffic/${recordId}`);
+      } catch (e) {
+        this.showToast(e.message, 'error');
+      }
+    },
+
+    async openTrafficForFact(fact) {
+      if (!fact?.provenance) return;
+      this.sideTab = 'traffic';
+      await this.searchTraffic(this.trafficQueryFromProvenance(fact.provenance));
+      const trafficIds = fact.provenance.traffic_ids || [];
+      if (trafficIds.length > 0) {
+        await this.openTrafficRecord(trafficIds[0]);
+      }
+    },
+
+    async copyPromptPreview() {
+      if (!this.promptPreview.promptText) return;
+      try {
+        await this.copyText(this.promptPreview.promptText);
+        this.showToast('Prompt 已复制');
+      } catch {
+        this.showToast('Prompt 复制失败', 'error');
       }
     },
 
@@ -1585,6 +2005,7 @@ function cairnApp() {
     },
 
     async loadProject(id) {
+      if (this.authEnabled && !this.authenticated) return;
       try { this.project = await this.api('GET', `/projects/${id}`); } catch(e) { this.showToast(e.message, 'error'); }
     },
 
@@ -2080,10 +2501,14 @@ function cairnApp() {
         this.polling = true;
       }
       this.rememberProjectListScroll();
+      this.closePromptModal();
       this.selectedProjectId = id;
       this.selectedNode = null;
       this.selectedFacts = [];
       this.selectedTimelineEntryId = null;
+      this.trafficResults = [];
+      this.selectedTraffic = null;
+      this.trafficQuery = '';
       await this.loadProject(id);
       this.view = 'graph';
       if (location.hash !== `#/projects/${id}`) location.hash = `/projects/${id}`;
@@ -2113,12 +2538,16 @@ function cairnApp() {
         this.polling = true;
       }
       this.view = 'list';
+      this.closePromptModal();
       this.shouldRestoreProjectListScroll = true;
       this.project = null;
       this.selectedProjectId = '';
       this.selectedNode = null;
       this.selectedFacts = [];
       this.selectedTimelineEntryId = null;
+      this.trafficResults = [];
+      this.selectedTraffic = null;
+      this.trafficQuery = '';
       this.teardownAutoFit();
       if (this.cy) { this.cy.destroy(); this.cy = null; }
       if (!fromRoute) location.hash = '/';
@@ -2126,8 +2555,10 @@ function cairnApp() {
     },
 
     startPolling() {
+      this.stopPolling();
       this.pollTimer = setInterval(async () => {
         if (!this.polling) return;
+        if (this.authEnabled && !this.authenticated) return;
         if (this.selectedProjectId && this.view === 'graph') {
           await this.loadProject(this.selectedProjectId);
           this.updateGraph();
@@ -2899,9 +3330,9 @@ function cairnApp() {
         id: `project-created-${this.project.project.id}`,
         type: 'project_created',
         timestamp: this.project.project.created_at,
-        actor: 'system',
+        actor: '系统',
         title: this.project.project.title,
-        meta: [origin ? origin.description : null, goal ? `goal: ${goal.description}` : null].filter(Boolean),
+        meta: [origin ? `起点：${origin.description}` : null, goal ? `目标：${goal.description}` : null].filter(Boolean),
         targetType: 'fact',
         targetId: 'origin',
         order: order++,
@@ -2934,7 +3365,7 @@ function cairnApp() {
           timestamp: intent.created_at,
           actor: intent.creator,
           title: intent.description,
-          meta: [intent.id, `from ${intent.from.join(', ')}`],
+          meta: [intent.id, `来源：${intent.from.join(', ')}`],
           targetType: 'intent',
           targetId: intent.id,
           order: order++,
@@ -2952,7 +3383,7 @@ function cairnApp() {
             timestamp: intent.concluded_at,
             actor: intent.worker || intent.creator,
             title: intent.description,
-            meta: [intent.id, `from ${intent.from.join(', ')}`],
+            meta: [intent.id, `来源：${intent.from.join(', ')}`],
             targetType: 'fact',
             targetId: 'goal',
             order: order++,
@@ -2970,7 +3401,7 @@ function cairnApp() {
           timestamp: intent.concluded_at,
           actor: intent.worker || intent.creator,
           title: fact ? fact.description : intent.description,
-          meta: [intent.id, `produced ${intent.to}`, `from ${intent.from.join(', ')}`],
+          meta: [intent.id, `产出：${intent.to}`, `来源：${intent.from.join(', ')}`],
           targetType: 'fact',
           targetId: intent.to,
           order: order++,
@@ -3062,15 +3493,15 @@ function cairnApp() {
 
     timelineEventBadge(entry) {
       const labels = {
-        project_created: 'Project',
-        hint_added: 'Hint',
-        reason_started: 'Reason',
-        intent_declared: 'Intent',
-        intent_running: 'Execute',
-        intent_concluded: 'Conclude',
-        project_completed: 'Complete',
+        project_created: '项目',
+        hint_added: '提示',
+        reason_started: '推理',
+        intent_declared: '意图',
+        intent_running: '执行',
+        intent_concluded: '结论',
+        project_completed: '完成',
       };
-      return labels[entry.type] || 'Event';
+      return labels[entry.type] || '事件';
     },
 
     timelineEventBadgeClass(entry) {
@@ -3255,9 +3686,9 @@ function cairnApp() {
       const hours = Math.floor(totalSeconds / 3600);
       const minutes = Math.floor((totalSeconds % 3600) / 60);
       const seconds = totalSeconds % 60;
-      if (hours > 0) return `${hours}h ${minutes}m`;
-      if (minutes > 0) return `${minutes}m ${seconds}s`;
-      return `${seconds}s`;
+      if (hours > 0) return `${hours}小时 ${minutes}分`;
+      if (minutes > 0) return `${minutes}分 ${seconds}秒`;
+      return `${seconds}秒`;
     },
 
     async createProject() {
@@ -3266,6 +3697,7 @@ function cairnApp() {
         const hintContents = this.newProject.hints.filter(h => h.content?.trim());
         const body = {
           title: this.newProject.title,
+          category: this.newProject.category,
           origin: this.newProject.origin,
           goal: this.newProject.goal,
           bootstrap_enabled: this.newProject.bootstrap
@@ -3274,7 +3706,7 @@ function cairnApp() {
         if (hints.length > 0) body.hints = hints;
         const data = await this.api('POST', '/projects', body);
         this.showNewProject = false;
-        this.newProject = { title:'', origin:'', goal:'', bootstrap: true, hints: [{ content:'' }] };
+        this.newProject = { title:'', category:'未分类', origin:'', goal:'', bootstrap: true, hints: [{ content:'' }] };
         await this.loadProjects();
         await this.openProject(data.project.id);
         this.showToast('Project created');

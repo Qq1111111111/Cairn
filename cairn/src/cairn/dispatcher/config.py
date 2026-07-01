@@ -153,6 +153,11 @@ class ContainerConfig(BaseModel):
     network_mode: str
     completed_action: CompletedAction
     cap_add: list[str] = Field(default_factory=list)
+    artifact_mirror_dir: Path | None = None
+    traffic_enabled: bool = False
+    traffic_mirror_dir: Path | None = None
+    traffic_proxy_host: str = "127.0.0.1"
+    traffic_proxy_port: int = Field(default=18080, ge=1, le=65535)
 
 
 class RuntimeConfig(BaseModel):
@@ -252,6 +257,24 @@ class DispatchConfig(BaseModel):
     def load(cls, path: Path) -> "DispatchConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
+        mirror_dir = config.container.artifact_mirror_dir
+        traffic_dir = config.container.traffic_mirror_dir
+        if mirror_dir is not None and not mirror_dir.is_absolute():
+            config = config.model_copy(
+                update={
+                    "container": config.container.model_copy(
+                        update={"artifact_mirror_dir": (path.parent / mirror_dir).resolve()}
+                    )
+                }
+            )
+        if traffic_dir is not None and not traffic_dir.is_absolute():
+            config = config.model_copy(
+                update={
+                    "container": config.container.model_copy(
+                        update={"traffic_mirror_dir": (path.parent / traffic_dir).resolve()}
+                    )
+                }
+            )
         validate_prompt_resources(config.runtime.prompt_group)
         return config
 

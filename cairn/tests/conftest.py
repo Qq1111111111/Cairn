@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
@@ -48,6 +49,7 @@ def make_project(*, intents: list[Intent] | None = None) -> ProjectDetail:
         project=ProjectMeta(
             id="proj_001",
             title="test",
+            category="未分类",
             status="active",
             bootstrap_enabled=True,
             created_at="2026-01-01T00:00:00Z",
@@ -66,6 +68,7 @@ def make_project(*, intents: list[Intent] | None = None) -> ProjectDetail:
                 created_at="2026-01-01T00:00:01Z",
             )
         ],
+        timeline_prompts=[],
     )
 
 
@@ -99,12 +102,18 @@ class FakeLease:
 @dataclass
 class FakeContainerManager:
     writes: list[tuple[str, str, str]] = field(default_factory=list)
+    copied_files: list[tuple[str, str, Path]] = field(default_factory=list)
+    next_copy_result: bool = True
 
     def ensure_running(self, project_id: str) -> str:
         return f"container-{project_id}"
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
         self.writes.append((container_name, path, content))
+
+    def copy_file_to_host(self, container_name: str, source_path: str, host_path: Path) -> bool:
+        self.copied_files.append((container_name, source_path, host_path))
+        return self.next_copy_result
 
 
 @dataclass
@@ -113,22 +122,48 @@ class FakeClient:
     concluded: list[tuple[str, str, str, str]] = field(default_factory=list)
     completed: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     created_intents: list[tuple[str, list[str], str, str]] = field(default_factory=list)
+    recorded_timeline_prompts: list[tuple[str, str, str, str, str, str | None]] = field(default_factory=list)
     released: list[tuple[str, str, str]] = field(default_factory=list)
     released_reasons: list[tuple[str, str]] = field(default_factory=list)
 
     def get_project(self, _project_id: str) -> ProjectDetail:
         return self.project
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
+    def conclude(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        description: str,
+        *,
+        provenance: dict | None = None,
+    ) -> ApiResult:
         self.concluded.append((project_id, intent_id, worker, description))
         return ApiResult(200, {"fact": {"id": "f002"}})
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
         self.completed.append((project_id, from_ids, description, worker))
-        return ApiResult(200, {})
+        completion_intent_id = f"i{len(self.completed) + len(self.project.intents):03d}"
+        return ApiResult(200, {"id": completion_intent_id})
 
     def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
         self.created_intents.append((project_id, from_ids, description, creator))
+        intent_id = f"i{len(self.project.intents) + len(self.created_intents):03d}"
+        return ApiResult(201, {"id": intent_id})
+
+    def record_timeline_prompt(
+        self,
+        project_id: str,
+        timeline_entry_id: str,
+        prompt_text: str,
+        phase: str,
+        worker: str,
+        *,
+        intent_id: str | None = None,
+    ) -> ApiResult:
+        self.recorded_timeline_prompts.append(
+            (project_id, timeline_entry_id, prompt_text, phase, worker, intent_id)
+        )
         return ApiResult(201, {})
 
     def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:

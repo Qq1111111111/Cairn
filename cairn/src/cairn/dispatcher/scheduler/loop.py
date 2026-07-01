@@ -18,6 +18,7 @@ from cairn.dispatcher.scheduler.worker_select import choose_worker
 from cairn.dispatcher.tasks.bootstrap import run_bootstrap_task
 from cairn.dispatcher.tasks.explore import run_explore_task
 from cairn.dispatcher.tasks.reason import run_reason_task
+from cairn.server.project_files import project_files_root
 from cairn.server.models import Intent, ProjectDetail, ProjectSummary
 
 LOG = logging.getLogger(__name__)
@@ -745,6 +746,48 @@ class DispatcherLoop:
     def _queue_container_cleanups(self, summaries: list[ProjectSummary]) -> None:
         self._cleanup_completed_containers(summaries)
         self._cleanup_stopped_containers(summaries)
+        self._cleanup_orphan_containers(summaries)
+        self._cleanup_orphan_project_files(summaries)
+
+    def _cleanup_orphan_containers(self, summaries: list[ProjectSummary]) -> None:
+        expected = {
+            self.container_manager.container_name(summary.id)
+            for summary in summaries
+        }
+        expected.update(
+            self.container_manager.container_name(task.project_id)
+            for task in self.futures.values()
+        )
+        for name in self.container_manager.managed_container_names():
+            if name in expected or name in self._cleanup_pending:
+                continue
+            if not self.container_manager.needs_orphan_cleanup(name):
+                continue
+            future = self.cleanup_executor.submit(self.container_manager.cleanup_orphan, name)
+            self.cleanup_futures[future] = (name, None, None)
+            self._cleanup_pending.add(name)
+
+    def _cleanup_orphan_project_files(self, summaries: list[ProjectSummary]) -> None:
+        roots = self.config.container.traffic_mirror_dir or self.config.container.artifact_mirror_dir
+        if roots is None:
+            return
+        root = project_files_root() if roots is None else roots
+        if not root.exists():
+            return
+        active_project_ids = {summary.id for summary in summaries}
+        active_project_ids.update(task.project_id for task in self.futures.values())
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            if child.name in active_project_ids:
+                continue
+            try:
+                import shutil
+
+                shutil.rmtree(child)
+                LOG.info("removed orphan project files project=%s path=%s", child.name, child)
+            except Exception:
+                LOG.exception("failed to remove orphan project files project=%s path=%s", child.name, child)
 
     def _reap_cleanup_futures(self) -> None:
         done = [future for future in self.cleanup_futures if future.done()]

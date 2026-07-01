@@ -71,6 +71,10 @@ def test_reason_writes_graph_snapshot_and_creates_intent(monkeypatch) -> None:
     assert content == graph_yaml
     assert graph_yaml not in driver.execute_prompts[0]
     assert path in driver.execute_prompts[0]
+    assert [entry[1] for entry in client.recorded_timeline_prompts] == [
+        "reason-started-i001",
+        "intent-declared-i001",
+    ]
 
 
 def test_explore_early_plain_text_exit_uses_conclude_fallback(monkeypatch) -> None:
@@ -112,6 +116,10 @@ def test_explore_early_plain_text_exit_uses_conclude_fallback(monkeypatch) -> No
     assert len(driver.execute_prompts) == 1
     assert len(driver.conclude_prompts) == 1
     assert lease.started and lease.stopped
+    assert [entry[1] for entry in client.recorded_timeline_prompts] == [
+        "intent-running-i001",
+        "intent-concluded-i001",
+    ]
 
 
 def test_explore_healthcheck_failure_releases_claim(monkeypatch) -> None:
@@ -184,6 +192,55 @@ def test_bootstrap_success_concludes_fact_then_completes_project(monkeypatch) ->
     assert client.concluded == [("proj_001", "i001", "test-worker", "solved")]
     assert client.completed == [("proj_001", ["f002"], "goal met", "test-worker")]
     assert lease.started and lease.stopped
+    assert [entry[1] for entry in client.recorded_timeline_prompts] == [
+        "intent-running-i001",
+        "intent-concluded-i001",
+        "project-completed-i002",
+    ]
+
+
+def test_explore_mirrors_workspace_artifacts_referenced_in_fact_description(monkeypatch, tmp_path) -> None:
+    config = make_config()
+    config.container.artifact_mirror_dir = tmp_path
+    intent = make_intent()
+    project = make_project(intents=[intent])
+    client = FakeClient(project)
+    containers = FakeContainerManager()
+    driver = FakeDriver()
+    lease = FakeLease()
+
+    monkeypatch.setattr(explore, "get_driver", lambda _name: driver)
+    monkeypatch.setattr(explore.HeartbeatLease, "for_intent", _lease_factory(lease))
+    monkeypatch.setattr(explore, "run_healthcheck", _healthy)
+    monkeypatch.setattr(
+        explore,
+        "_run_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"description":"Results saved to /home/kali/workspace/output/result.json"}}',
+            "",
+        ),
+    )
+
+    outcome = explore.run_explore_task(
+        config,
+        client,
+        containers,
+        project,
+        "facts:\n- id: f001\n",
+        intent,
+        config.workers[0],
+        TaskCancellation(),
+    )
+
+    assert outcome == "success"
+    assert containers.copied_files == [
+        (
+            "container-proj_001",
+            "/home/kali/workspace/output/result.json",
+            tmp_path / "proj_001" / "i001" / "output" / "result.json",
+        )
+    ]
 
 
 def test_reason_complete_treats_inactive_project_as_success(monkeypatch) -> None:
@@ -222,6 +279,9 @@ def test_reason_complete_treats_inactive_project_as_success(monkeypatch) -> None
 
     assert outcome == "success"
     assert client.released_reasons == [("proj_001", "test-worker")]
+    assert [entry[1] for entry in client.recorded_timeline_prompts] == [
+        "project-completed-i001",
+    ]
 
 
 def test_reason_startup_only_mode_skips_task_healthcheck(monkeypatch) -> None:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from cairn.server.models import Intent, ProjectMeta, ProjectReason
+from cairn.server.models import Fact, FactProvenance, Intent, ProjectMeta, ProjectReason, TimelinePrompt
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -173,6 +175,36 @@ def build_intents(conn: sqlite3.Connection, project_id: str) -> list[Intent]:
     return [intent_to_model(conn, r, project_id) for r in rows]
 
 
+def build_facts(conn: sqlite3.Connection, project_id: str) -> list[Fact]:
+    rows = conn.execute(
+        """
+        SELECT f.id, f.description,
+               p.scheme, p.host, p.port, p.method, p.path, p.url, p.interface_label, p.repro_command,
+               p.evidence_files_json, p.traffic_ids_json
+        FROM facts f
+        LEFT JOIN fact_provenance p
+          ON p.project_id = f.project_id AND p.fact_id = f.id
+        WHERE f.project_id = ?
+        ORDER BY f.rowid
+        """,
+        (project_id,),
+    ).fetchall()
+    return [fact_from_row(row) for row in rows]
+
+
+def build_timeline_prompts(conn: sqlite3.Connection, project_id: str) -> list[TimelinePrompt]:
+    rows = conn.execute(
+        """
+        SELECT timeline_entry_id, intent_id, phase, worker, prompt_text, created_at
+        FROM timeline_prompts
+        WHERE project_id = ?
+        ORDER BY created_at, timeline_entry_id
+        """,
+        (project_id,),
+    ).fetchall()
+    return [TimelinePrompt(**dict(row)) for row in rows]
+
+
 def get_intent_timeout(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT intent_timeout FROM settings WHERE rowid = 1").fetchone()
     return row["intent_timeout"]
@@ -198,11 +230,33 @@ def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
     return ProjectMeta(
         id=row["id"],
         title=row["title"],
+        category=row["category"],
         status=row["status"],
         bootstrap_enabled=bool(row["bootstrap_enabled"]),
         created_at=row["created_at"],
         reason=project_reason_from_row(row),
     )
+
+
+def fact_from_row(row: sqlite3.Row) -> Fact:
+    provenance = None
+    if any(
+        row[key] is not None
+        for key in ("scheme", "host", "port", "method", "path", "url", "interface_label", "repro_command")
+    ) or row["evidence_files_json"] not in (None, "[]") or row["traffic_ids_json"] not in (None, "[]"):
+        provenance = FactProvenance(
+            scheme=row["scheme"],
+            host=row["host"],
+            port=row["port"],
+            method=row["method"],
+            path=row["path"],
+            url=row["url"],
+            interface_label=row["interface_label"],
+            repro_command=row["repro_command"],
+            evidence_files=json.loads(row["evidence_files_json"] or "[]"),
+            traffic_ids=json.loads(row["traffic_ids_json"] or "[]"),
+        )
+    return Fact(id=row["id"], description=row["description"], provenance=provenance)
 
 
 def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:
